@@ -441,33 +441,107 @@ def main():
         from_str = from_dt.strftime("%Y-%m-%d %H:%M:%S")
         to_str = to_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        for symbol in NIFTY50_TOP10:
-            name = symbol_to_name.get(symbol, symbol)
-            token = get_instrument_token(symbol, instruments)
-            if token is None:
-                st.warning(f"{symbol} – instrument not found.")
-                continue
-            try:
-                candles = kite.historical_data(token, from_str, to_str, interval=chosen_interval)
-            except Exception as e:
-                st.error(f"{symbol} – {e}")
-                continue
-            df = candles_to_dataframe(candles)
-            if df.empty:
-                st.caption(f"**{symbol}** — {name}: No data for {chosen_date}")
-                continue
-            strategies = get_applicable_strategies(df, chosen_interval)
-            strategy_label = ", ".join(strategies) if strategies else "—"
+        MOCK_QTY = 1
+        symbol_results = []
+        with st.spinner("Loading data for all 10 stocks..."):
+            for symbol in NIFTY50_TOP10:
+                name = symbol_to_name.get(symbol, symbol)
+                token = get_instrument_token(symbol, instruments)
+                if token is None:
+                    continue
+                try:
+                    candles = kite.historical_data(token, from_str, to_str, interval=chosen_interval)
+                except Exception:
+                    continue
+                df = candles_to_dataframe(candles)
+                if df.empty:
+                    continue
+                last_close = float(df["close"].iloc[-1])
+                strategies = get_applicable_strategies(df, chosen_interval)
+                strategy_label = ", ".join(strategies) if strategies else "—"
+                analyses = get_strategy_analyses(df, chosen_interval)
+                trade_rows = []
+                seen_strategy = set()
+                if analyses:
+                    for sname, text, sig in analyses:
+                        if sname in seen_strategy:
+                            continue
+                        if sig.get("signal") and sig.get("target") is not None and sig.get("stop") is not None:
+                            entry_bar_idx = sig.get("entry_bar_idx")
+                            if entry_bar_idx is not None and 0 <= entry_bar_idx < len(df):
+                                entry = float(df.iloc[entry_bar_idx]["close"])
+                            else:
+                                entry = last_close
+                            target = sig["target"]
+                            stop = sig["stop"]
+                            closed_at, exit_price, pl = _simulate_trade_close(
+                                df, entry_bar_idx, entry, target, stop, sig["signal"], MOCK_QTY
+                            )
+                            value = entry * MOCK_QTY
+                            trade_rows.append({
+                                "Strategy": sname,
+                                "Signal": sig["signal"],
+                                "Entry": entry,
+                                "Closed at": closed_at,
+                                "Exit": exit_price,
+                                "P/L": pl,
+                                "Value": value,
+                            })
+                            seen_strategy.add(sname)
+                symbol_results.append({
+                    "symbol": symbol,
+                    "name": name,
+                    "df": df,
+                    "strategies": strategies,
+                    "strategy_label": strategy_label,
+                    "analyses": analyses,
+                    "trade_rows": trade_rows,
+                    "last_close": last_close,
+                    "day_high": df["high"].max(),
+                    "day_low": df["low"].min(),
+                    "day_vol": df["volume"].sum(),
+                })
+
+        total_trades = sum(len(r["trade_rows"]) for r in symbol_results)
+        total_finished = sum(
+            1 for r in symbol_results for t in r["trade_rows"]
+            if t.get("Closed at") in ("Target", "Stop")
+        )
+        realised_pl = sum(
+            t["P/L"] for r in symbol_results for t in r["trade_rows"]
+            if t.get("Closed at") in ("Target", "Stop")
+        )
+        unrealised_pl = sum(
+            t["P/L"] for r in symbol_results for t in r["trade_rows"]
+            if t.get("Closed at") == "EOD"
+        )
+        total_pl = realised_pl + unrealised_pl
+        total_traded_value = sum(t["Value"] for r in symbol_results for t in r["trade_rows"])
+
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Total trades", total_trades)
+        m2.metric("Total finished trades", total_finished)
+        m3.metric("Realised P/L", f"₹{realised_pl:+,.2f}")
+        m4.metric("Unrealised P/L", f"₹{unrealised_pl:+,.2f}")
+        m5.metric("Total P/L", f"₹{total_pl:+,.2f}")
+        m6.metric("Total traded value", f"₹{total_traded_value:,.2f}")
+        st.caption("1 trade per strategy per stock (max 4 strategies: ORB, VWAP, RSI, Flag).")
+        st.divider()
+
+        for r in symbol_results:
+            symbol = r["symbol"]
+            name = r["name"]
+            df = r["df"]
+            strategy_label = r["strategy_label"]
+            analyses = r["analyses"]
+            trade_rows = r["trade_rows"]
+            last_close = r["last_close"]
             with st.expander(f"**{symbol}** — {name} · {strategy_label}", expanded=True):
-                last_close = df["close"].iloc[-1]
-                day_high = df["high"].max()
-                day_low = df["low"].min()
-                day_vol = df["volume"].sum()
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Close", f"₹{last_close:,.2f}")
-                c2.metric("High", f"₹{day_high:,.2f}")
-                c3.metric("Low", f"₹{day_low:,.2f}")
-                c4.metric("Volume", f"{day_vol:,.0f}")
+                c2.metric("High", f"₹{r['day_high']:,.2f}")
+                c3.metric("Low", f"₹{r['day_low']:,.2f}")
+                c4.metric("Volume", f"{r['day_vol']:,.0f}")
                 col_chart, col_analysis = st.columns([2, 1])
                 with col_chart:
                     fig = go.Figure()
@@ -487,11 +561,19 @@ def main():
                         xaxis_rangeslider_visible=False,
                     )
                     st.plotly_chart(fig, use_container_width=True)
+                    if trade_rows:
+                        st.markdown("**Mock trade record**")
+                        trade_df = pd.DataFrame(trade_rows)
+                        st.dataframe(
+                            trade_df.style.format({
+                                "Entry": "₹{:,.2f}", "Exit": "₹{:,.2f}", "P/L": "₹{:+,.2f}", "Value": "₹{:,.2f}",
+                            }, na_rep="—"),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        st.caption(f"**Total value:** ₹{sum(t['Value'] for t in trade_rows):,.2f} · **Total P/L:** ₹{sum(t['P/L'] for t in trade_rows):+,.2f} (trade closed when target or stop hit).")
                 with col_analysis:
                     st.markdown("**Why (numbers)**")
-                    analyses = get_strategy_analyses(df, chosen_interval)
-                    MOCK_QTY = 1
-                    trade_rows = []
                     if analyses:
                         for sname, text, sig in analyses:
                             st.markdown(f"**{sname}**")
@@ -507,35 +589,12 @@ def main():
                                 closed_at, exit_price, pl = _simulate_trade_close(
                                     df, entry_bar_idx, entry, target, stop, sig["signal"], MOCK_QTY
                                 )
-                                value = entry * MOCK_QTY
-                                trade_rows.append({
-                                    "Strategy": sname,
-                                    "Signal": sig["signal"],
-                                    "Entry": entry,
-                                    "Closed at": closed_at,
-                                    "Exit": exit_price,
-                                    "P/L": pl,
-                                    "Value": value,
-                                })
                                 if sig["signal"] == "SELL":
                                     st.error(f"**SELL** · Target ₹{target:,.2f} · Stop ₹{stop:,.2f}")
                                 else:
                                     st.success(f"**BUY** · Target ₹{target:,.2f} · Stop ₹{stop:,.2f}")
                                 st.caption(f"Trade closed at **{closed_at}** · Exit ₹{exit_price:,.2f} · P/L: ₹{pl:+,.2f}")
-                    if trade_rows:
-                        st.markdown("**Mock trade record**")
-                        trade_df = pd.DataFrame(trade_rows)
-                        st.dataframe(
-                            trade_df.style.format({
-                                "Entry": "₹{:,.2f}", "Exit": "₹{:,.2f}", "P/L": "₹{:+,.2f}", "Value": "₹{:,.2f}",
-                            }, na_rep="—"),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                        total_value = sum(r["Value"] for r in trade_rows)
-                        total_pl = sum(r["P/L"] for r in trade_rows)
-                        st.caption(f"**Total value:** ₹{total_value:,.2f} · **Total P/L:** ₹{total_pl:+,.2f} (trade closed when target or stop hit).")
-                    if not analyses:
+                    else:
                         st.caption("No strategy met the criteria for this data.")
         return
 
