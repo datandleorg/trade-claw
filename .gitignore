@@ -1,0 +1,12 @@
+.env
+.kite_session.json
+.venv/
+
+__pycache__/
+*.pyc
+*.db
+data/*.db
+.uv/
+
+.venv/
+data/

@@ -1,0 +1,12 @@
+[project]
+name = "trade-claw"
+version = "0.1.0"
+description = "Streamlit app for Kite Connect historical prices (HDFC Bank)"
+requires-python = ">=3.12"
+dependencies = [
+    "python-dotenv",
+    "streamlit",
+    "kiteconnect",
+    "pandas",
+    "plotly",
+]
