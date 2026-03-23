@@ -17,6 +17,7 @@ from trade_claw.constants import (
     FO_ENVELOPE_BANDWIDTH_MAX_PCT,
     FO_ENVELOPE_BANDWIDTH_MIN_PCT,
     FO_ENVELOPE_BANDWIDTH_STEP,
+    FO_OPTION_STOP_LOSS_PCT,
     FO_OPTION_TARGET_PCT,
     FO_STRATEGY_ENVELOPE,
     FO_STRATEGY_MA_CROSS,
@@ -29,6 +30,7 @@ from trade_claw.constants import (
     NSE_EXCHANGE,
 )
 from trade_claw.fo_openai_agent import configure_fo_agent_logging, get_openai_api_key, run_fo_agent_pipeline
+from trade_claw.kite_session import get_kite_credentials
 from trade_claw.pl_style import pl_markdown, pl_title_color
 from trade_claw.strategies import add_ma_ema_line_traces, add_ma_envelope_line_traces
 
@@ -104,9 +106,12 @@ def render_fo_agent_options(kite):
     session_upper = min(today, month_end)
 
     st.info(
-        "**Mock backtest only.** The agent uses **read-only** Kite calls (instruments search, historical OHLC). "
-        "**No order APIs** are exposed to the model. Tools are in-process (same as Kite MCP-style search), "
-        "not Cursor’s IDE MCP.\n\n"
+        "**Mock backtest only.** The model only sees **`search_instruments`**, **`get_historical_data`**, "
+        "and **`submit_mock_trade_choice`** (no `place_order` / GTT / other write tools).\n\n"
+        "When **`KITE_MCP_ENABLED=1`** (or `KITE_MCP_STREAMABLE_URL` / `KITE_MCP_COMMAND` is set), "
+        "the two read tools call the **Zerodha Kite MCP server**. "
+        "Otherwise the same parameters run in-process via KiteConnect. "
+        "`submit_mock_trade_choice` is always app-side only (mock).\n\n"
         f"**Current month:** {month_start.isoformat()} to {session_upper.isoformat()} (session date cannot exceed today)."
     )
 
@@ -213,6 +218,8 @@ def render_fo_agent_options(kite):
     name = symbol_to_name.get(underlying, underlying) if underlying not in ("NIFTY", "BANKNIFTY") else underlying
 
     if load and api_key:
+        k_api, _k_sec = get_kite_credentials()
+        acc_tok = st.session_state.get("access_token")
         with st.spinner("Running deterministic strategy + OpenAI agent (mock only)..."):
             try:
                 result = run_fo_agent_pipeline(
@@ -229,6 +236,8 @@ def render_fo_agent_options(kite):
                     brokerage_per_lot_rt=float(brokerage_per_lot_rt),
                     taxes_per_lot_rt=float(taxes_per_lot_rt),
                     openai_api_key=api_key,
+                    kite_api_key=str(k_api).strip() if k_api else None,
+                    kite_access_token=str(acc_tok).strip() if acc_tok else None,
                 )
                 st.session_state["fo_agent_last_result"] = result
             except Exception as e:
@@ -300,7 +309,13 @@ def render_fo_agent_options(kite):
         with m1:
             st.metric("Option trades", f"{total_trades:,}")
         with m2:
-            st.metric("Hit premium target", f"{total_finished:,}")
+            _nt = 1 if t.get("Closed at") == "Target" else 0
+            _ns = 1 if t.get("Closed at") == "Stop" else 0
+            st.metric(
+                "Target / stop (realised)",
+                f"{total_finished:,}",
+                help=f"1 if closed at target or stop ({_nt}T/{_ns}S); 0 if EOD only.",
+            )
         with m3:
             st.markdown(
                 f"**Realised P/L (net)**<br/>{_abbrev_pl_html(realised_pl)}",
@@ -322,8 +337,13 @@ def render_fo_agent_options(kite):
             st.metric("Txn brk+tax", _abbrev_rupee(total_txn_cost))
 
         st.markdown(f"**Net P/L:** {pl_markdown(total_pl)}")
+        _sl_txt = (
+            f"stop −{100 * FO_OPTION_STOP_LOSS_PCT:.0f}% on bar low (same-bar: target wins)"
+            if FO_OPTION_STOP_LOSS_PCT > 0
+            else "no stop (set FO_OPTION_STOP_LOSS_PCT>0 in env)"
+        )
         st.caption(
-            f"Exit rule: premium target +{100 * FO_OPTION_TARGET_PCT:.0f}% on bar high, else EOD close. "
+            f"Exit rule: target +{100 * FO_OPTION_TARGET_PCT:.0f}% on premium high; {_sl_txt}; else EOD. "
             "1 lot; costs per lot as entered."
         )
 

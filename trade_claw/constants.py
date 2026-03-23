@@ -8,11 +8,13 @@ SESSION_FILE = os.path.join(_ROOT, ".kite_session.json")
 NSE_EXCHANGE = "NSE"
 NFO_EXCHANGE = "NFO"
 
-# F&O mock: long premium only; exit when option high >= entry*(1+FO_OPTION_TARGET_PCT) else EOD close
-FO_OPTION_TARGET_PCT = 0.25
+# F&O mock: long premium — target on bar high, stop on bar low, else EOD (see option_trades)
+FO_OPTION_TARGET_PCT = float(os.environ.get("FO_OPTION_TARGET_PCT", "0.25"))
+# Stop = exit when premium low <= entry × (1 − pct). Set env to 0 to disable stop (target/EOD only).
+FO_OPTION_STOP_LOSS_PCT = float(os.environ.get("FO_OPTION_STOP_LOSS_PCT", "0.15"))
 FO_DEFAULT_UNDERLYINGS = ["NIFTY", "BANKNIFTY"]
-# Summary metrics: Target hit = realised; EOD square-off = unrealised bucket (same idea as cash EOD)
-FO_CLOSED_AT_REALISED = ("Target",)
+# Summary metrics: Target or Stop = realised; EOD = held to close
+FO_CLOSED_AT_REALISED = ("Target", "Stop")
 # F&O UI: envelope distance each side as % of EMA (upper = EMA×(1+pct), lower = EMA×(1−pct))
 FO_ENVELOPE_BANDWIDTH_MIN_PCT = 0.0
 FO_ENVELOPE_BANDWIDTH_MAX_PCT = 2.0

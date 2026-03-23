@@ -1,6 +1,5 @@
-"""F&O: underlying strategy (envelope or EMA cross) → long CE/PE; premium target or EOD; lot costs."""
-import calendar
-from datetime import date, datetime
+"""F&O: underlying strategy (envelope or EMA cross) → long CE/PE; premium target, stop, or EOD; lot costs."""
+from datetime import date, timedelta
 import html
 
 import pandas as pd
@@ -16,6 +15,7 @@ from trade_claw.constants import (
     FO_ENVELOPE_BANDWIDTH_MAX_PCT,
     FO_ENVELOPE_BANDWIDTH_MIN_PCT,
     FO_ENVELOPE_BANDWIDTH_STEP,
+    FO_OPTION_STOP_LOSS_PCT,
     FO_OPTION_TARGET_PCT,
     FO_STRATEGY_ENVELOPE,
     FO_STRATEGY_MA_CROSS,
@@ -29,7 +29,8 @@ from trade_claw.constants import (
     NFO_EXCHANGE,
     NSE_EXCHANGE,
 )
-from trade_claw.fo_runner import iter_calendar_dates_in_month, run_fo_underlying_one_day
+from trade_claw.fo_options_persist import fingerprint_params, save_fo_options_snapshot
+from trade_claw.fo_runner import run_fo_underlying_one_day
 from trade_claw.pl_style import pl_markdown, pl_title_color, style_pl_dataframe
 from trade_claw.strategies import add_ma_ema_line_traces, add_ma_envelope_line_traces
 
@@ -84,28 +85,26 @@ def render_fo_options(kite):
 
     st.title("F&O options – intraday underlying signal (long premium only)")
     today = date.today()
-    _, _last_dom = calendar.monthrange(today.year, today.month)
-    month_start = date(today.year, today.month, 1)
-    month_end = date(today.year, today.month, _last_dom)
-    session_upper = min(today, month_end)
+    date_min = today - timedelta(days=365)
+    date_max = today
 
     st.info(
-        f"**This page uses the current calendar month only** ({month_start.strftime('%b %d')} → "
-        f"{month_end.strftime('%b %d, %Y')}), with session dates **not after today** "
-        f"({session_upper.isoformat()}). "
-        "Option contracts come from Kite’s **live NFO list** (nearest expiry on/after each session day); "
-        "older months are disabled because expired series don’t match today’s instrument master."
+        "**Session date** can be any day in the last year through today. "
+        "Option contracts come from Kite’s **live NFO list** (nearest expiry on/after the session day). "
+        "Very old dates may not resolve if the chain no longer matches history. "
+        "Each time you **change parameters**, the run is saved under **`data/fo_options_runs/`** (JSON) for analysis — "
+        "see **`FO_OPTIONS_RUNS_DIR`** in `.env.example` to override the folder."
     )
     st.caption(
         "**Envelope:** first **close** above upper / below lower band (not wick-only). "
         "→ long ATM **CE** / **PE**. **EMA cross:** first golden / death cross in session → **CE** / **PE**. "
-        "No short options. Exit: premium **+"
-        f"{100 * FO_OPTION_TARGET_PCT:.0f}%** vs bar **high**, else **EOD**. "
+        "No short options. Exit: **target** = premium **+"
+        f"{100 * FO_OPTION_TARGET_PCT:.0f}%** on bar **high**; **stop** = drop from entry on bar **low** (see slider); else **EOD**. "
         "Mock size: **always 1 lot** per symbol (exchange `lot_size` × premium). "
         "P/L **net** = gross premium P/L − (brokerage + tax) × 1 lot."
     )
 
-    nav1, nav2, nav3, nav4, nav5 = st.columns(5)
+    nav1, nav2, nav3, nav4, nav5, nav6 = st.columns(6)
     with nav1:
         if st.button("Intraday home", key="fo_nav_all10"):
             st.session_state.view = "all10"
@@ -131,6 +130,11 @@ def render_fo_options(kite):
             st.session_state.view = "fo_agent"
             st.session_state.selected_symbol = None
             st.rerun()
+    with nav6:
+        if st.button("Snapshots", key="fo_nav_fo_snap"):
+            st.session_state.view = "fo_snapshots"
+            st.session_state.selected_symbol = None
+            st.rerun()
 
     _ndef = "NIFTY" if "NIFTY" in FO_UNDERLYING_OPTIONS else FO_UNDERLYING_OPTIONS[0]
     _u_idx = FO_UNDERLYING_OPTIONS.index(_ndef) if _ndef in FO_UNDERLYING_OPTIONS else 0
@@ -140,11 +144,6 @@ def render_fo_options(kite):
         index=_u_idx,
         key="fo_underlying_single",
     )
-    st.caption(
-        "The **month table** below replays the same rules on **each weekday from the 1st through today** "
-        "(weekends and **future** dates in the month are skipped; holidays show as few/no bars)."
-    )
-
     strategy_choice = st.selectbox(
         "Underlying strategy",
         options=FO_STRATEGY_OPTIONS,
@@ -155,10 +154,10 @@ def render_fo_options(kite):
 
     intraday_intervals = [i for i in DEFAULT_INTERVALS if i != "day"]
     chosen_date = st.date_input(
-        "Session date (this month only, not after today)",
-        value=session_upper,
-        min_value=month_start,
-        max_value=session_upper,
+        "Session date",
+        value=today,
+        min_value=date_min,
+        max_value=date_max,
         key="fo_date",
     )
     chosen_interval = st.selectbox(
@@ -209,6 +208,21 @@ def render_fo_options(kite):
             help="STT, stamp, exchange—your lump sum per lot for the full round trip.",
         )
 
+    _sl_default = float(min(50.0, max(0.0, round(100 * FO_OPTION_STOP_LOSS_PCT, 2))))
+    option_stop_loss_pct_ui = st.slider(
+        "Stop loss below entry (premium %)",
+        min_value=0.0,
+        max_value=50.0,
+        value=_sl_default,
+        step=0.5,
+        key="fo_option_stop_loss_pct_ui",
+        help=(
+            "**0** = no stop (only target or EOD). Otherwise exit when option bar **low** ≤ entry × (1 − %/100). "
+            "Same-bar as target: **target wins** (same rule as cash BUY in this app)."
+        ),
+    )
+    option_stop_loss_pct = option_stop_loss_pct_ui / 100.0
+
     strike_policy_label = st.selectbox(
         "Option strike vs spot",
         options=FO_STRIKE_POLICY_LABELS,
@@ -230,19 +244,15 @@ def render_fo_options(kite):
         step=50,
         value=0,
         key="fo_manstrike_single",
-        help="When >0, nearest listed strike to this value is used for the selected underlying (session + month scan).",
+        help="When >0, nearest listed strike to this value is used for the selected underlying.",
     )
     manual_strike_val = float(manual_strike_raw) if manual_strike_raw and float(manual_strike_raw) > 0 else None
 
     name = symbol_to_name.get(underlying, underlying) if underlying not in ("NIFTY", "BANKNIFTY") else underlying
 
     rows_out: list[dict] = []
-    month_rows: list[dict] = []
 
-    with st.spinner(
-        f"Running {strategy_choice} + options for **{underlying}** "
-        f"(session + month-to-date {month_start:%Y-%m-%d} … {session_upper:%Y-%m-%d})..."
-    ):
+    with st.spinner(f"Running {strategy_choice} + options for **{underlying}** on **{chosen_date}**..."):
         rows_out.append(
             run_fo_underlying_one_day(
                 kite=kite,
@@ -261,85 +271,9 @@ def render_fo_options(kite):
                 brokerage_per_lot_rt=brokerage_per_lot_rt,
                 taxes_per_lot_rt=taxes_per_lot_rt,
                 include_chart_data=True,
+                option_stop_loss_pct=option_stop_loss_pct,
             )
         )
-        for d in iter_calendar_dates_in_month(today):
-            if d > today:
-                month_rows.append({
-                    "Session date": d,
-                    "Underlying": underlying,
-                    "Name": name,
-                    "Strategy": "—",
-                    "Leg": "—",
-                    "Option": "—",
-                    "Strike": float("nan"),
-                    "Strike pick": "—",
-                    "Note": "Future date — not run",
-                    "Signal": "—",
-                    "Lots": 0,
-                    "Lot size": float("nan"),
-                    "Qty": 0,
-                    "Entry": float("nan"),
-                    "Target prem.": float("nan"),
-                    "Txn cost": 0.0,
-                    "P/L gross": 0.0,
-                    "Closed at": "—",
-                    "Exit": float("nan"),
-                    "P/L": 0.0,
-                    "Value": 0.0,
-                    "df_u": None,
-                    "df_o": None,
-                    "trade": None,
-                })
-                continue
-            if d.weekday() >= 5:
-                month_rows.append({
-                    "Session date": d,
-                    "Underlying": underlying,
-                    "Name": name,
-                    "Strategy": "—",
-                    "Leg": "—",
-                    "Option": "—",
-                    "Strike": float("nan"),
-                    "Strike pick": "—",
-                    "Note": "Weekend — not run",
-                    "Signal": "—",
-                    "Lots": 0,
-                    "Lot size": float("nan"),
-                    "Qty": 0,
-                    "Entry": float("nan"),
-                    "Target prem.": float("nan"),
-                    "Txn cost": 0.0,
-                    "P/L gross": 0.0,
-                    "Closed at": "—",
-                    "Exit": float("nan"),
-                    "P/L": 0.0,
-                    "Value": 0.0,
-                    "df_u": None,
-                    "df_o": None,
-                    "trade": None,
-                })
-                continue
-            month_rows.append(
-                run_fo_underlying_one_day(
-                    kite=kite,
-                    nse_instruments=nse,
-                    nfo_instruments=nfo,
-                    underlying=underlying,
-                    name=name,
-                    session_date=d,
-                    chosen_interval=chosen_interval,
-                    strategy_is_envelope=strategy_is_envelope,
-                    envelope_pct=envelope_pct,
-                    strategy_choice=strategy_choice,
-                    steps_from_atm=steps_from_atm,
-                    strike_policy_label=strike_policy_label,
-                    manual_strike_val=manual_strike_val,
-                    brokerage_per_lot_rt=brokerage_per_lot_rt,
-                    taxes_per_lot_rt=taxes_per_lot_rt,
-                    include_chart_data=False,
-                )
-            )
 
     trade_rows = [r["trade"] for r in rows_out if r.get("trade")]
     total_trades = len(trade_rows)
@@ -350,6 +284,58 @@ def render_fo_options(kite):
     total_traded_value = sum(t["Value"] for t in trade_rows)
     total_txn_cost = sum(t.get("Txn cost", 0.0) for t in trade_rows)
 
+    run_params = {
+        "underlying": underlying,
+        "name": name,
+        "session_date": chosen_date.isoformat(),
+        "chosen_interval": chosen_interval,
+        "strategy_choice": strategy_choice,
+        "strategy_is_envelope": strategy_is_envelope,
+        "envelope_pct": envelope_pct,
+        "envelope_bw_pct": envelope_bw_pct,
+        "envelope_ema_period": ENVELOPE_EMA_PERIOD,
+        "ma_ema_fast": MA_EMA_FAST,
+        "ma_ema_slow": MA_EMA_SLOW,
+        "brokerage_per_lot_rt": brokerage_per_lot_rt,
+        "taxes_per_lot_rt": taxes_per_lot_rt,
+        "option_stop_loss_pct": option_stop_loss_pct,
+        "option_target_pct": FO_OPTION_TARGET_PCT,
+        "option_stop_loss_pct_default_constant": FO_OPTION_STOP_LOSS_PCT,
+        "strike_policy_label": strike_policy_label,
+        "steps_from_atm": steps_from_atm,
+        "manual_strike_val": manual_strike_val,
+    }
+    metrics = {
+        "total_trades": total_trades,
+        "total_finished": total_finished,
+        "target_exits": sum(1 for t in trade_rows if t.get("Closed at") == "Target"),
+        "stop_exits": sum(1 for t in trade_rows if t.get("Closed at") == "Stop"),
+        "eod_exits": sum(1 for t in trade_rows if t.get("Closed at") == "EOD"),
+        "realised_pl_net": realised_pl,
+        "eod_pl_net": unrealised_pl,
+        "total_pl_net": total_pl,
+        "total_traded_value": total_traded_value,
+        "total_txn_cost": total_txn_cost,
+    }
+    fp_now = fingerprint_params(run_params)
+    last_fp = st.session_state.get("fo_options_last_persisted_fp")
+    if last_fp != fp_now:
+        try:
+            saved_path = save_fo_options_snapshot(
+                params=run_params,
+                rows_out=rows_out,
+                metrics=metrics,
+            )
+            st.session_state["fo_options_last_persisted_fp"] = fp_now
+            st.session_state["fo_options_last_saved_path"] = str(saved_path)
+            toast = getattr(st, "toast", None)
+            if callable(toast):
+                st.toast(f"Saved run snapshot: {saved_path.name}", icon="💾")
+            else:
+                st.sidebar.success(f"Saved run: `{saved_path.name}`")
+        except OSError as e:
+            st.warning(f"Could not save run snapshot to disk: {e}")
+
     m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
     with m1:
         st.metric(
@@ -358,10 +344,12 @@ def render_fo_options(kite):
             help=f"{total_trades:,} executed mock option trade(s). Hover label for full count.",
         )
     with m2:
+        _nt = sum(1 for t in trade_rows if t.get("Closed at") == "Target")
+        _ns = sum(1 for t in trade_rows if t.get("Closed at") == "Stop")
         st.metric(
-            "Hit premium target",
+            "Target / stop (realised)",
             f"{total_finished:,}",
-            help=f"{total_finished:,} trade(s) hit premium target (vs EOD).",
+            help=f"{total_finished:,} exited on target or stop ({_nt} target, {_ns} stop). EOD is separate.",
         )
     with m3:
         st.markdown(
@@ -393,14 +381,24 @@ def render_fo_options(kite):
     if strategy_is_envelope:
         st.caption(
             f"Strategy: **{FO_STRATEGY_ENVELOPE}** — EMA{ENVELOPE_EMA_PERIOD} ±{envelope_bw_pct:.2f}% · "
-            f"option target = entry × (1 + {FO_OPTION_TARGET_PCT:.2f}). "
-            f"Deduction = (brokerage + taxes) × **1 lot** per trade."
+            f"target prem = entry × (1 + {FO_OPTION_TARGET_PCT:.2f})"
+            + (
+                f", stop prem = entry × (1 − {option_stop_loss_pct:.2f})"
+                if option_stop_loss_pct > 0
+                else " (no stop — slider at 0%)"
+            )
+            + ". Deduction = (brokerage + taxes) × **1 lot** per trade."
         )
     else:
         st.caption(
             f"Strategy: **{FO_STRATEGY_MA_CROSS}** — EMA {MA_EMA_FAST} / {MA_EMA_SLOW} · "
-            f"option target = entry × (1 + {FO_OPTION_TARGET_PCT:.2f}). "
-            f"Deduction = (brokerage + taxes) × **1 lot** per trade."
+            f"target prem = entry × (1 + {FO_OPTION_TARGET_PCT:.2f})"
+            + (
+                f", stop prem = entry × (1 − {option_stop_loss_pct:.2f})"
+                if option_stop_loss_pct > 0
+                else " (no stop — slider at 0%)"
+            )
+            + ". Deduction = (brokerage + taxes) × **1 lot** per trade."
         )
     st.divider()
 
@@ -525,6 +523,24 @@ def render_fo_options(kite):
                     _net = float(t["P/L"])
                     _gross = float(t.get("P/L gross", _net))
                     _txn = float(t.get("Txn cost", 0.0))
+                    _tp = t.get("Target prem.")
+                    _sp = t.get("Stop prem.")
+                    if _tp is not None and not pd.isna(_tp):
+                        fig_o.add_hline(
+                            y=float(_tp),
+                            line_dash="dash",
+                            line_color="rgba(34,197,94,0.85)",
+                            annotation_text="Target",
+                            annotation_position="right",
+                        )
+                    if _sp is not None and not pd.isna(_sp):
+                        fig_o.add_hline(
+                            y=float(_sp),
+                            line_dash="dash",
+                            line_color="rgba(239,68,68,0.85)",
+                            annotation_text="Stop",
+                            annotation_position="right",
+                        )
                     fig_o.update_layout(
                         title=dict(
                             text=(
@@ -561,6 +577,7 @@ def render_fo_options(kite):
         "Qty",
         "Entry",
         "Target prem.",
+        "Stop prem.",
         "Txn cost",
         "P/L gross",
         "Closed at",
@@ -584,6 +601,7 @@ def render_fo_options(kite):
             "Qty": "{:,.0f}",
             "Entry": "₹{:,.2f}",
             "Target prem.": "₹{:,.2f}",
+            "Stop prem.": "₹{:,.2f}",
             "Txn cost": "₹{:,.2f}",
             "P/L gross": "₹{:+,.2f}",
             "Exit": "₹{:,.2f}",
@@ -600,82 +618,6 @@ def render_fo_options(kite):
         _tpl = sum(t["P/L"] for t in trade_rows)
         st.markdown(f"**Session net P/L (if trade executed):** {pl_markdown(_tpl)}")
 
-    st.divider()
-    month_trade_rows = [r["trade"] for r in month_rows if r.get("trade")]
-    month_n_trades = len(month_trade_rows)
-    month_hit_target = sum(1 for t in month_trade_rows if t.get("Closed at") in FO_CLOSED_AT_REALISED)
-    month_eod_exits = sum(1 for t in month_trade_rows if t.get("Closed at") == "EOD")
-    month_realised_pl = sum(t["P/L"] for t in month_trade_rows if t.get("Closed at") in FO_CLOSED_AT_REALISED)
-    month_eod_pl = sum(t["P/L"] for t in month_trade_rows if t.get("Closed at") == "EOD")
-    month_total_pl = month_realised_pl + month_eod_pl
-    month_txn_total = sum(t.get("Txn cost", 0.0) for t in month_trade_rows)
-    _skip_notes = frozenset({"Weekend — not run", "Future date — not run"})
-    month_weekdays = sum(1 for r in month_rows if r.get("Note") not in _skip_notes)
-
-    st.markdown(f"### Current month (MTD) — **{today.strftime('%B %Y')}** · `{underlying}`")
-    st.caption(
-        f"Same strategy, interval, strike policy, brokerage/taxes, and manual strike as above. "
-        f"**{month_weekdays}** weekday(s) from month start through **{session_upper.isoformat()}** "
-        f"with a full run (weekends & future dates excluded)."
-    )
-    mx1, mx2, mx3, mx4, mx5, mx6 = st.columns(6)
-    with mx1:
-        st.metric("MTD trades", f"{month_n_trades:,}", help="Mock option trades with a filled position (month to date).")
-    with mx2:
-        st.metric("Target hit", f"{month_hit_target:,}", help="Exits on premium target (vs EOD).")
-    with mx3:
-        st.metric("EOD exits", f"{month_eod_exits:,}", help="Held to end of session.")
-    with mx4:
-        st.markdown(
-            f"**MTD net P/L**<br/>{_abbrev_pl_html(month_total_pl)}",
-            unsafe_allow_html=True,
-        )
-    with mx5:
-        st.metric(
-            "MTD txn (brk+tax)",
-            _abbrev_rupee(month_txn_total),
-            help=f"Full: ₹{month_txn_total:,.2f}",
-        )
-    with mx6:
-        st.markdown(
-            f"**Realised / EOD (net)**<br/>{_abbrev_pl_html(month_realised_pl)} / {_abbrev_pl_html(month_eod_pl)}",
-            unsafe_allow_html=True,
-        )
-
-    month_disp_cols = [
-        "Session date",
-        "Note",
-        "Signal",
-        "Leg",
-        "Option",
-        "Strike",
-        "Strike pick",
-        "Closed at",
-        "Txn cost",
-        "P/L gross",
-        "P/L",
-    ]
-    month_disp_rows = []
-    for r in month_rows:
-        row = {k: r[k] for k in month_disp_cols if k in r}
-        sd = row.get("Session date")
-        if sd is not None and hasattr(sd, "isoformat"):
-            row["Session date"] = sd.isoformat()
-        month_disp_rows.append(row)
-    month_df = pd.DataFrame(month_disp_rows)
-    if not month_df.empty:
-        mfmt = {
-            "Strike": "{:,.0f}",
-            "Txn cost": "₹{:,.2f}",
-            "P/L gross": "₹{:+,.2f}",
-            "P/L": "₹{:+,.2f}",
-        }
-        mstyled = style_pl_dataframe(
-            month_df.style.format(mfmt, na_rep="—"),
-            "P/L",
-            "P/L gross",
-        )
-        st.dataframe(mstyled, use_container_width=True, hide_index=True)
-    if month_trade_rows:
-        _mpl = sum(t["P/L"] for t in month_trade_rows)
-        st.markdown(f"**MTD net P/L (sum of executed trades this month):** {pl_markdown(_mpl)}")
+    _last_path = st.session_state.get("fo_options_last_saved_path")
+    if _last_path:
+        st.caption(f"**Last saved snapshot:** `{_last_path}`")

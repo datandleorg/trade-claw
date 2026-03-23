@@ -6,6 +6,7 @@ from datetime import date, datetime
 from trade_claw.constants import (
     ENVELOPE_EMA_PERIOD,
     FO_MAX_EXPIRY_CANDLE_FALLBACKS,
+    FO_OPTION_STOP_LOSS_PCT,
     FO_OPTION_TARGET_PCT,
     MA_EMA_FAST,
     MA_EMA_SLOW,
@@ -17,7 +18,7 @@ from trade_claw.fo_support import (
     fetch_underlying_intraday,
 )
 from trade_claw.market_data import candles_to_dataframe
-from trade_claw.option_trades import simulate_long_option_target_or_eod
+from trade_claw.option_trades import simulate_long_option_target_stop_eod
 from trade_claw.strategies import _ma_ema_crossover_analysis, _ma_envelope_analysis
 
 
@@ -40,11 +41,16 @@ def run_fo_underlying_one_day(
     taxes_per_lot_rt: float,
     include_chart_data: bool = True,
     min_session_bars: int = REPORTS_MIN_BARS_PER_DAY,
+    option_target_pct: float | None = None,
+    option_stop_loss_pct: float | None = None,
 ) -> dict:
     """
     Run full F&O mock pipeline for one calendar session day and one underlying.
     Returns a row dict aligned with fo_options table/chart expectations.
     """
+    _otp = float(FO_OPTION_TARGET_PCT if option_target_pct is None else option_target_pct)
+    _osl = float(FO_OPTION_STOP_LOSS_PCT if option_stop_loss_pct is None else option_stop_loss_pct)
+
     from_dt = datetime(session_date.year, session_date.month, session_date.day, 9, 15, 0)
     to_dt = datetime(session_date.year, session_date.month, session_date.day, 15, 30, 0)
     from_str = from_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -74,6 +80,7 @@ def run_fo_underlying_one_day(
             "Qty": 0,
             "Entry": float("nan"),
             "Target prem.": float("nan"),
+            "Stop prem.": float("nan"),
             "Txn cost": 0.0,
             "P/L gross": 0.0,
             "Closed at": "—",
@@ -101,6 +108,7 @@ def run_fo_underlying_one_day(
             "Qty": 0,
             "Entry": float("nan"),
             "Target prem.": float("nan"),
+            "Stop prem.": float("nan"),
             "Txn cost": 0.0,
             "P/L gross": 0.0,
             "Closed at": "—",
@@ -135,6 +143,7 @@ def run_fo_underlying_one_day(
             "Qty": 0,
             "Entry": float("nan"),
             "Target prem.": float("nan"),
+            "Stop prem.": float("nan"),
             "Txn cost": 0.0,
             "P/L gross": 0.0,
             "Closed at": "—",
@@ -169,6 +178,7 @@ def run_fo_underlying_one_day(
             "Qty": 0,
             "Entry": float("nan"),
             "Target prem.": float("nan"),
+            "Stop prem.": float("nan"),
             "Txn cost": 0.0,
             "P/L gross": 0.0,
             "Closed at": "—",
@@ -221,6 +231,7 @@ def run_fo_underlying_one_day(
             "Qty": 0,
             "Entry": float("nan"),
             "Target prem.": float("nan"),
+            "Stop prem.": float("nan"),
             "Txn cost": 0.0,
             "P/L gross": 0.0,
             "Closed at": "—",
@@ -285,6 +296,7 @@ def run_fo_underlying_one_day(
             "Qty": 0,
             "Entry": float("nan"),
             "Target prem.": float("nan"),
+            "Stop prem.": float("nan"),
             "Txn cost": 0.0,
             "P/L gross": 0.0,
             "Closed at": "—",
@@ -317,6 +329,7 @@ def run_fo_underlying_one_day(
             "Qty": 0,
             "Entry": float("nan"),
             "Target prem.": float("nan"),
+            "Stop prem.": float("nan"),
             "Txn cost": 0.0,
             "P/L gross": 0.0,
             "Closed at": "—",
@@ -347,6 +360,7 @@ def run_fo_underlying_one_day(
             "Qty": 0,
             "Entry": entry_premium,
             "Target prem.": float("nan"),
+            "Stop prem.": float("nan"),
             "Txn cost": 0.0,
             "P/L gross": 0.0,
             "Closed at": "—",
@@ -360,13 +374,17 @@ def run_fo_underlying_one_day(
             **_chart_mk,
         })
 
-    target_prem = entry_premium * (1.0 + FO_OPTION_TARGET_PCT)
+    target_prem = entry_premium * (1.0 + _otp)
+    stop_prem: float | None = None
+    if _osl > 0:
+        sp = entry_premium * (1.0 - _osl)
+        stop_prem = sp if sp > 0 else None
     ls = max(1, int(opt_inst.get("lot_size") or 1))
     n_lots = 1
     qty = ls
 
-    closed_at, exit_price, gross_pl, exit_bar_idx = simulate_long_option_target_or_eod(
-        df_o, opt_entry_idx, entry_premium, target_prem, float(qty)
+    closed_at, exit_price, gross_pl, exit_bar_idx = simulate_long_option_target_stop_eod(
+        df_o, opt_entry_idx, entry_premium, target_prem, float(qty), stop_price=stop_prem
     )
     txn_cost = n_lots * (brokerage_per_lot_rt + taxes_per_lot_rt)
     net_pl = gross_pl - txn_cost
@@ -383,6 +401,7 @@ def run_fo_underlying_one_day(
         "Qty": qty,
         "Entry": entry_premium,
         "Target prem.": target_prem,
+        "Stop prem.": stop_prem if stop_prem is not None else float("nan"),
         "entry_bar_idx": entry_bar_idx,
         "exit_bar_idx": exit_bar_idx,
         "opt_entry_idx": opt_entry_idx,
@@ -412,6 +431,7 @@ def run_fo_underlying_one_day(
         "Qty": qty,
         "Entry": entry_premium,
         "Target prem.": target_prem,
+        "Stop prem.": stop_prem if stop_prem is not None else float("nan"),
         "Txn cost": txn_cost,
         "P/L gross": gross_pl,
         "Closed at": closed_at,

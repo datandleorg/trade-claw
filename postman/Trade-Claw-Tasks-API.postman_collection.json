@@ -1,0 +1,233 @@
+{
+  "info": {
+    "_postman_id": "8f3c2a10-4b9e-4d1f-9c2a-7e6d5c4b3a21",
+    "name": "Trade Claw — Tasks API",
+    "description": "FastAPI task control (`trade_claw.api_server`): SQLite metadata, Celery workers, Redis pub/sub → SSE.\n\n**Setup:** Set `baseUrl` (default `http://127.0.0.1:8000`). Run **Start task** once; the test script stores `task_id` on the collection for Stop / Pause / Resume / Get / Events.\n\n**SSE:** Postman may buffer or time out on **Stream task events**; use curl or a browser `EventSource` for long-lived streams.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8000"
+    },
+    {
+      "key": "task_id",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/health",
+        "description": "Liveness check."
+      },
+      "response": []
+    },
+    {
+      "name": "Purge Celery broker queues",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": "{{baseUrl}}/api/celery/purge-queues",
+        "description": "Discards all waiting tasks on the default broker queue (same as `celery -A trade_claw.celery_app purge`). Does not touch SQLite. Stop workers, call this, then restart worker."
+      },
+      "response": []
+    },
+    {
+      "name": "Tasks",
+      "item": [
+        {
+          "name": "Start task",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const j = pm.response.json();",
+                  "    if (j.task_id) {",
+                  "        pm.collectionVariables.set('task_id', j.task_id);",
+                  "        console.log('Saved task_id:', j.task_id);",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"stream_demo\",\n  \"label\": \"demo\",\n  \"max_ticks\": 120\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/start",
+            "description": "Creates SQLite row and enqueues `stream_demo` (1s tick events, loop inside the worker; stop/pause/resume via API). `max_ticks` 1–1_000_000. `task_id` saved by test script."
+          },
+          "response": []
+        },
+        {
+          "name": "Start llm_joke_agent",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const j = pm.response.json();",
+                  "    if (j.task_id) {",
+                  "        pm.collectionVariables.set('task_id', j.task_id);",
+                  "        console.log('Saved task_id:', j.task_id);",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"llm_joke_agent\",\n  \"label\": \"jokes\",\n  \"max_ticks\": 12,\n  \"interval_seconds\": 10\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/start",
+            "description": "OpenAI joke loop: SSE events `joke` every `interval_seconds` (default 10). Requires `OPENAI_API_KEY` in env for the worker. Model from `OPENAI_MODEL` (see `.env.example`)."
+          },
+          "response": []
+        },
+        {
+          "name": "List tasks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/tasks?limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "tasks"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "100",
+                  "description": "Max rows (default 100)"
+                }
+              ]
+            },
+            "description": "Recent tasks, newest first."
+          },
+          "response": []
+        },
+        {
+          "name": "Stop all tasks",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/tasks/stop-all",
+            "description": "Redis stop + Celery revoke for every SQLite task not in stopped/completed/failed. Updates status to stopping; emits stop_requested (bulk) per task."
+          },
+          "response": []
+        },
+        {
+          "name": "Purge all tasks",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/tasks/purge-all",
+            "description": "Nuclear: stop+revoke every task id in DB, delete Redis pause/stop keys, then DELETE all task_events and tasks rows."
+          },
+          "response": []
+        },
+        {
+          "name": "Get task",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/tasks/{{task_id}}",
+            "description": "Task metadata from SQLite. Set `task_id` or run **Start task** first."
+          },
+          "response": []
+        },
+        {
+          "name": "Stop task",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/tasks/{{task_id}}/stop",
+            "description": "Redis stop flag + Celery revoke (no terminate). Idempotent if already stopped/completed/failed."
+          },
+          "response": []
+        },
+        {
+          "name": "Pause task",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/tasks/{{task_id}}/pause",
+            "description": "Sets pause key; worker emits `paused` on next tick. 409 if completed/failed/stopped."
+          },
+          "response": []
+        },
+        {
+          "name": "Resume task",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/tasks/{{task_id}}/resume",
+            "description": "Clears pause key. 409 if completed/failed/stopped."
+          },
+          "response": []
+        },
+        {
+          "name": "Task events history (SQLite)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/tasks/{{task_id}}/events/history?limit=200&offset=0&order=asc",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "tasks", "{{task_id}}", "events", "history"],
+              "query": [
+                { "key": "limit", "value": "200" },
+                { "key": "offset", "value": "0" },
+                { "key": "order", "value": "asc", "description": "asc | desc" },
+                { "key": "event_type", "value": "", "disabled": true, "description": "Optional: tick, stopped, …" }
+              ]
+            },
+            "description": "Stored copy of every event published via Redis (same payload as SSE). Pagination: limit, offset, order; optional event_type filter."
+          },
+          "response": []
+        },
+        {
+          "name": "Stream task events (SSE)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tasks/{{task_id}}/events",
+            "description": "Server-Sent Events from Redis pub/sub. Postman may not stream indefinitely; prefer curl:\n\n`curl -N '{{baseUrl}}/api/tasks/<TASK_ID>/events'`"
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

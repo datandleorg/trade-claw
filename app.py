@@ -17,6 +17,7 @@ from trade_claw.views.all_ten import render_all_ten
 from trade_claw.views.dashboard import render_dashboard
 from trade_claw.views.fo_agent_options import render_fo_agent_options
 from trade_claw.views.fo_options import render_fo_options
+from trade_claw.views.fo_options_snapshots_report import render_fo_options_snapshots_report
 from trade_claw.views.index_etfs import render_index_etfs
 from trade_claw.views.reports import render_reports
 from trade_claw.views.stock_detail import render_stock_detail
@@ -126,6 +127,10 @@ def main():
                 st.session_state.view = "fo_agent"
                 st.session_state.selected_symbol = None
                 st.rerun()
+        if st.button("F&O snapshots report", use_container_width=True, key="nav_fo_snap"):
+            st.session_state.view = "fo_snapshots"
+            st.session_state.selected_symbol = None
+            st.rerun()
 
     kite = st.session_state.kite
 
@@ -147,6 +152,10 @@ def main():
 
     if st.session_state.view == "fo_agent":
         render_fo_agent_options(kite)
+        return
+
+    if st.session_state.view == "fo_snapshots":
+        render_fo_options_snapshots_report(kite)
         return
 
     if st.session_state.selected_symbol is None:
