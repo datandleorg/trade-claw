@@ -11,8 +11,18 @@ NFO_EXCHANGE = "NFO"
 # F&O mock: long premium — target on bar high, stop on bar low, else EOD (see option_trades)
 FO_OPTION_TARGET_PCT = float(os.environ.get("FO_OPTION_TARGET_PCT", "0.25"))
 # Stop = exit when premium low <= entry × (1 − pct). Set env to 0 to disable stop (target/EOD only).
-FO_OPTION_STOP_LOSS_PCT = float(os.environ.get("FO_OPTION_STOP_LOSS_PCT", "0.15"))
-FO_DEFAULT_UNDERLYINGS = ["NIFTY", "BANKNIFTY"]
+FO_OPTION_STOP_LOSS_PCT = float(os.environ.get("FO_OPTION_STOP_LOSS_PCT", "0.10"))
+# NSE index F&O underlyings (keys must match Kite NFO `name` / resolver in fo_support)
+FO_INDEX_UNDERLYING_KEYS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"]
+# Human labels for UI (NIFTYNXT50 = Nifty Next 50; NFO may list as NIFTYJR or NIFTYNXT50)
+FO_INDEX_UNDERLYING_LABELS = {
+    "NIFTY": "NIFTY 50",
+    "BANKNIFTY": "BANK NIFTY",
+    "FINNIFTY": "FINNIFTY (Nifty Financial Services)",
+    "MIDCPNIFTY": "MIDCP NIFTY (Nifty Midcap Select)",
+    "NIFTYNXT50": "NIFTY NEXT 50",
+}
+FO_DEFAULT_UNDERLYINGS = list(FO_INDEX_UNDERLYING_KEYS)
 # Summary metrics: Target or Stop = realised; EOD = held to close
 FO_CLOSED_AT_REALISED = ("Target", "Stop")
 # F&O UI: envelope distance each side as % of EMA (upper = EMA×(1+pct), lower = EMA×(1−pct))
@@ -38,6 +48,8 @@ FO_STRIKE_POLICY_STEPS = [0, 1, 2, -1, -2]
 # When the first NFO row for nearest expiry returns no minute candles, try more expiries / duplicate symbols
 FO_MAX_EXPIRY_CANDLE_FALLBACKS = 12
 DEFAULT_INTERVALS = ["minute", "3minute", "5minute", "10minute", "15minute", "30minute", "60minute", "day"]
+# Default candle interval for intraday selectboxes (F&O, intraday home, reports day mode)
+DEFAULT_INTRADAY_INTERVAL = "minute"
 
 NIFTY50_SYMBOLS = [
     "ADANIPORTS", "ASIANPAINT", "AXISBANK", "BAJAJ-AUTO", "BAJFINANCE", "BAJAJFINSV",
@@ -48,7 +60,7 @@ NIFTY50_SYMBOLS = [
     "SBILIFE", "SBIN", "SUNPHARMA", "TATAMOTORS", "TCS", "TATACONSUM", "TATASTEEL",
     "TECHM", "TITAN", "UPL", "WIPRO", "APOLLOHOSP", "BEL", "ULTRACEMCO", "LTIM", "ADANIENT",
 ]
-FO_UNDERLYING_OPTIONS = ["NIFTY", "BANKNIFTY"] + NIFTY50_SYMBOLS
+FO_UNDERLYING_OPTIONS = list(FO_INDEX_UNDERLYING_KEYS) + NIFTY50_SYMBOLS
 NIFTY50_TOP10 = [
     "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
     "HINDUNILVR", "SBIN", "BHARTIARTL", "ITC", "KOTAKBANK",
@@ -72,7 +84,7 @@ ALL10_STRATEGY_OPTIONS = [
 MA_EMA_FAST = 9
 MA_EMA_SLOW = 20
 ENVELOPE_EMA_PERIOD = 20
-ENVELOPE_PCT = 0.003  # 0.3% distance each side of EMA (intraday home default)
+ENVELOPE_PCT = 0.002  # 0.2% distance each side of EMA (intraday / F&O envelope default)
 
 CLOSED_AT_REALISED = ("Target", "Stop", "Opposite envelope")
 

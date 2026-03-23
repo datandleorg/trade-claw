@@ -387,7 +387,7 @@ def simulate_trade_close(df, entry_bar_idx, entry_price, target, stop, signal, q
     return "EOD", exit_price, pl, last_idx
 
 
-def get_applicable_strategies(df, interval_str="5minute"):
+def get_applicable_strategies(df, interval_str="minute"):
     strategies = []
     if df.empty or len(df) < 2:
         return strategies
@@ -408,7 +408,7 @@ def get_applicable_strategies(df, interval_str="5minute"):
     return strategies
 
 
-def get_strategy_analyses(df, interval_str="5minute"):
+def get_strategy_analyses(df, interval_str="minute"):
     out = []
     if df.empty or len(df) < 2:
         return out

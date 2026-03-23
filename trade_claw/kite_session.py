@@ -25,7 +25,7 @@ def init_session_state():
     if "nse_instruments" not in st.session_state:
         st.session_state.nse_instruments = None
     if "view" not in st.session_state:
-        st.session_state.view = "all10"
+        st.session_state.view = "fo_options"
 
 
 def save_session_to_file(api_key, access_token):

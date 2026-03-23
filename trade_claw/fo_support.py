@@ -44,25 +44,38 @@ def is_nfo_option(inst: dict) -> bool:
     return inst.get("exchange") == "NFO" and inst.get("instrument_type") in ("CE", "PE")
 
 
+# NFO instrument `name` (upper) for each index underlying key (see constants.FO_INDEX_UNDERLYING_KEYS).
+# NIFTYNXT50: Kite has used NIFTYJR and/or NIFTYNXT50 — accept both.
+_INDEX_NFO_NAMES: dict[str, frozenset[str]] = {
+    "NIFTY": frozenset({"NIFTY"}),
+    "BANKNIFTY": frozenset({"BANKNIFTY"}),
+    "FINNIFTY": frozenset({"FINNIFTY"}),
+    "MIDCPNIFTY": frozenset({"MIDCPNIFTY"}),
+    "NIFTYNXT50": frozenset({"NIFTYJR", "NIFTYNXT50"}),
+}
+
+
+def nfo_index_name_set(underlying: str) -> frozenset[str] | None:
+    """If `underlying` is a configured index key, return allowed NFO `name` values (uppercase); else None."""
+    return _INDEX_NFO_NAMES.get(underlying.upper().strip())
+
+
 def filter_options_by_underlying(nfo_instruments: list, underlying: str) -> list[dict]:
-    """Filter NFO CE/PE rows for NIFTY, BANKNIFTY, or equity underlying symbol."""
+    """Filter NFO CE/PE rows for index keys (FO_INDEX_*) or equity underlying symbol."""
     u = underlying.upper().strip()
+    index_names = nfo_index_name_set(u)
     out = []
     for i in nfo_instruments:
         if not is_nfo_option(i):
             continue
         name = (i.get("name") or "").upper().strip()
         ts = (i.get("tradingsymbol") or "").upper()
-        # Index chains: match **name** only so we don't pull NIFTYNXT / FINNIFTY / etc. by prefix.
-        if u == "NIFTY":
-            if name == "NIFTY":
+        if index_names is not None:
+            if name in index_names:
                 out.append(i)
-        elif u == "BANKNIFTY":
-            if name == "BANKNIFTY":
-                out.append(i)
-        else:
-            if name == u or ts.startswith(u):
-                out.append(i)
+            continue
+        if name == u or ts.startswith(u):
+            out.append(i)
     return out
 
 
@@ -252,12 +265,12 @@ def align_option_entry_bar(
     df_under: pd.DataFrame,
     df_opt: pd.DataFrame,
     entry_bar_idx: int,
-    interval_key: str = "5minute",
+    interval_key: str = "minute",
 ) -> int | None:
     """Map underlying bar index to option row by nearest timestamp (tolerance scales with bar size)."""
     if df_under.empty or df_opt.empty or entry_bar_idx < 0 or entry_bar_idx >= len(df_under):
         return None
-    bar_sec = max(60, int(INTERVAL_MINUTES.get(interval_key, 5) * 60))
+    bar_sec = max(60, int(INTERVAL_MINUTES.get(interval_key, 1) * 60))
     # Allow ~1 bar of clock skew between NSE index and NFO series from Kite
     tol_sec = bar_sec + 150
     t0 = _ts_minute(df_under.iloc[entry_bar_idx]["date"])
@@ -274,27 +287,46 @@ def align_option_entry_bar(
     return None
 
 
+# NSE indices: `tradingsymbol` candidates (first match in instrument master wins).
+_INDEX_NSE_SPOT_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "NIFTY": ("NIFTY 50",),
+    "BANKNIFTY": ("NIFTY BANK",),
+    "FINNIFTY": ("NIFTY FIN SERVICE", "NIFTY FIN SERV"),
+    "MIDCPNIFTY": ("NIFTY MIDCAP SELECT", "NIFTY MID SELECT"),
+    "NIFTYNXT50": ("NIFTY NEXT 50",),
+}
+
+
 def underlying_index_tradingsymbol(underlying: str) -> str | None:
-    """NSE cash index symbol for quote/historical (approximate)."""
-    if underlying.upper() == "NIFTY":
-        return "NIFTY 50"
-    if underlying.upper() == "BANKNIFTY":
-        return "NIFTY BANK"
-    return None
+    """First NSE cash index symbol for this key, without consulting instrument list (best-effort)."""
+    u = underlying.upper().strip()
+    cands = _INDEX_NSE_SPOT_CANDIDATES.get(u)
+    return cands[0] if cands else None
+
+
+def _nse_spot_candidates_for_underlying(underlying: str) -> list[str]:
+    u = underlying.upper().strip()
+    if u in _INDEX_NSE_SPOT_CANDIDATES:
+        return list(_INDEX_NSE_SPOT_CANDIDATES[u])
+    return [underlying]
 
 
 def fetch_underlying_intraday(kite, underlying: str, nse_instruments, from_str: str, to_str: str, interval: str):
-    """Load intraday OHLC for index (NIFTY/BANKNIFTY) or equity symbol."""
-    idx_sym = underlying_index_tradingsymbol(underlying)
-    sym = idx_sym or underlying
-    token = get_instrument_token(sym, nse_instruments)
-    if token is None:
-        return None, f"No NSE instrument for {sym}"
-    try:
-        candles = kite.historical_data(token, from_str, to_str, interval=interval)
-    except Exception as e:
-        return None, str(e)
-    df = candles_to_dataframe(candles)
-    if df.empty:
-        return None, "No underlying candles"
-    return df.sort_values("date").reset_index(drop=True), None
+    """Load intraday OHLC for index (FO_INDEX_* keys) or equity symbol."""
+    last_err: str | None = None
+    for sym in _nse_spot_candidates_for_underlying(underlying):
+        token = get_instrument_token(sym, nse_instruments)
+        if token is None:
+            last_err = f"No NSE instrument for {sym}"
+            continue
+        try:
+            candles = kite.historical_data(token, from_str, to_str, interval=interval)
+        except Exception as e:
+            last_err = str(e)
+            continue
+        df = candles_to_dataframe(candles)
+        if df.empty:
+            last_err = f"No underlying candles for {sym}"
+            continue
+        return df.sort_values("date").reset_index(drop=True), None
+    return None, last_err or f"No NSE data for {underlying}"

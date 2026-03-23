@@ -8,6 +8,7 @@ from trade_claw.constants import (
     ALL10_STRATEGY_OPTIONS,
     CLOSED_AT_REALISED,
     DEFAULT_INTERVALS,
+    DEFAULT_INTRADAY_INTERVAL,
     NIFTY50_DEFAULT_SELECTED,
     NIFTY50_SYMBOLS,
     NSE_EXCHANGE,
@@ -86,10 +87,15 @@ def render_reports(kite):
         key="rep_strategy",
     )
     intraday_intervals = [i for i in DEFAULT_INTERVALS if i != "day"]
+    _int_idx = (
+        intraday_intervals.index(DEFAULT_INTRADAY_INTERVAL)
+        if DEFAULT_INTRADAY_INTERVAL in intraday_intervals
+        else 0
+    )
     chosen_interval = st.selectbox(
         "Minute interval",
         options=intraday_intervals,
-        index=intraday_intervals.index("5minute"),
+        index=_int_idx,
         key="rep_interval",
     )
     selected_stocks = st.multiselect(

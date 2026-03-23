@@ -8,10 +8,14 @@ import streamlit as st
 
 from trade_claw.constants import (
     DEFAULT_INTERVALS,
+    DEFAULT_INTRADAY_INTERVAL,
     ENVELOPE_EMA_PERIOD,
     ENVELOPE_PCT,
     FO_BROKERAGE_PER_LOT_RT_DEFAULT,
     FO_CLOSED_AT_REALISED,
+    FO_DEFAULT_UNDERLYINGS,
+    FO_INDEX_UNDERLYING_KEYS,
+    FO_INDEX_UNDERLYING_LABELS,
     FO_ENVELOPE_BANDWIDTH_MAX_PCT,
     FO_ENVELOPE_BANDWIDTH_MIN_PCT,
     FO_ENVELOPE_BANDWIDTH_STEP,
@@ -34,6 +38,31 @@ from trade_claw.fo_runner import run_fo_underlying_one_day
 from trade_claw.pl_style import pl_markdown, pl_title_color, style_pl_dataframe
 from trade_claw.strategies import add_ma_ema_line_traces, add_ma_envelope_line_traces
 
+FO_OPTIONS_DETAIL_COLS = [
+    "Session date",
+    "Underlying",
+    "Name",
+    "Strategy",
+    "Leg",
+    "Option",
+    "Strike",
+    "Strike pick",
+    "Note",
+    "Signal",
+    "Lots",
+    "Lot size",
+    "Qty",
+    "Entry",
+    "Target prem.",
+    "Stop prem.",
+    "Txn cost",
+    "P/L gross",
+    "Closed at",
+    "Exit",
+    "P/L",
+    "Value",
+]
+
 
 def _abbrev_rupee(x: float) -> str:
     """Short rupee label for metric cards (hover shows full precision)."""
@@ -50,6 +79,194 @@ def _abbrev_rupee(x: float) -> str:
     return f"{sgn}₹{v:,.0f}"
 
 
+def _fo_display_name(symbol_to_name: dict, u: str) -> str:
+    if u in FO_INDEX_UNDERLYING_LABELS:
+        return str(FO_INDEX_UNDERLYING_LABELS[u]).split("(")[0].strip()
+    return symbol_to_name.get(u, u)
+
+
+def _fo_underlying_select_label(u: str) -> str:
+    """Selectbox: index rows show descriptive label + key; stocks show symbol only."""
+    if u in FO_INDEX_UNDERLYING_LABELS:
+        return f"{FO_INDEX_UNDERLYING_LABELS[u]} — `{u}`"
+    return u
+
+
+def _fo_sanitize_st_key(s: str, max_len: int = 120) -> str:
+    """Streamlit element keys: stable alphanumeric + underscore (avoid duplicate ID collisions)."""
+    out = []
+    for ch in str(s):
+        if ch.isalnum():
+            out.append(ch)
+        elif ch in ("-", ".", " "):
+            out.append("_")
+    x = "".join(out).strip("_") or "x"
+    return x[:max_len]
+
+
+def _fo_expander_charts_single_row(
+    r: dict,
+    *,
+    chart_key_prefix: str,
+    sk_render: str,
+    envelope_pct: float,
+    expanded: bool = False,
+    table_relative: str = "below",
+) -> None:
+    """Underlying + option candle charts and strategy caption for one mock F&O row."""
+    _kpre = _fo_sanitize_st_key(chart_key_prefix)
+    df_u = r.get("df_u")
+    u = r.get("Underlying", "—")
+    nm = r.get("Name", "")
+    t = r.get("trade")
+    df_o = r.get("df_o")
+    if df_u is None:
+        note = str(r.get("Note", "No underlying data"))
+        exp_sub = (note[:72] + "…") if len(note) > 72 else note
+        with st.expander(f"**{u}** — {nm} · {exp_sub}", expanded=expanded):
+            st.caption(r.get("_analysis_text") or note)
+        return
+    if t:
+        _stk = t.get("Strike")
+        _sk = ""
+        if _stk is not None and not pd.isna(_stk):
+            _sk = f" @{float(_stk):,.0f}"
+        exp_sub = f"{t['Leg']}{_sk} `{t['Option']}`"
+    else:
+        note = str(r.get("Note", "No option trade"))
+        exp_sub = (note[:72] + "…") if len(note) > 72 else note
+    cap = (t.get("why") if t else None) or r.get("_analysis_text") or r.get("Note", "")
+    with st.expander(f"**{u}** — {nm} · {exp_sub}", expanded=expanded):
+        st.caption(cap)
+        c1, c2 = st.columns(2)
+        with c1:
+            if sk_render == "envelope":
+                st.markdown("**Underlying + envelope**")
+                spot_title = "Spot (envelope)"
+            else:
+                st.markdown("**Underlying + EMA crossover**")
+                spot_title = f"Spot (EMA {MA_EMA_FAST}/{MA_EMA_SLOW})"
+            fig_u = go.Figure()
+            fig_u.add_trace(
+                go.Candlestick(
+                    x=df_u["date"],
+                    open=df_u["open"],
+                    high=df_u["high"],
+                    low=df_u["low"],
+                    close=df_u["close"],
+                    name="Underlying",
+                )
+            )
+            if sk_render == "envelope":
+                add_ma_envelope_line_traces(fig_u, df_u, ema_period=ENVELOPE_EMA_PERIOD, pct=envelope_pct)
+            else:
+                add_ma_ema_line_traces(fig_u, df_u)
+            _ei_raw = (t.get("entry_bar_idx") if t else None) or r.get("_chart_entry_bar_idx")
+            try:
+                ei = int(_ei_raw) if _ei_raw is not None else None
+            except (TypeError, ValueError):
+                ei = None
+            sig_m = (t.get("Signal") if t else None) or r.get("_chart_spot_signal")
+            du = df_u["date"]
+            if ei is not None and sig_m in ("BUY", "SELL") and 0 <= ei < len(du):
+                fig_u.add_trace(
+                    go.Scatter(
+                        x=[du.iloc[ei]],
+                        y=[float(df_u.iloc[ei]["close"])],
+                        mode="markers",
+                        marker=dict(
+                            symbol="triangle-up" if sig_m == "BUY" else "triangle-down",
+                            size=14,
+                            color="lime" if sig_m == "BUY" else "tomato",
+                            line=dict(width=1, color="black"),
+                        ),
+                        name=sig_m,
+                    )
+                )
+            fig_u.update_layout(
+                title=spot_title,
+                height=320,
+                xaxis_rangeslider_visible=False,
+            )
+            st.plotly_chart(fig_u, use_container_width=True, key=f"{_kpre}_spot")
+        with c2:
+            if t and df_o is not None and not df_o.empty:
+                st.markdown("**Option premium (mock exit)**")
+                fig_o = go.Figure()
+                fig_o.add_trace(
+                    go.Candlestick(
+                        x=df_o["date"],
+                        open=df_o["open"],
+                        high=df_o["high"],
+                        low=df_o["low"],
+                        close=df_o["close"],
+                        name=t["Option"],
+                    )
+                )
+                oei = t.get("opt_entry_idx")
+                oxi = t.get("exit_bar_idx")
+                ddt = df_o["date"]
+                if oei is not None and 0 <= oei < len(ddt):
+                    fig_o.add_trace(
+                        go.Scatter(
+                            x=[ddt.iloc[oei]],
+                            y=[t["Entry"]],
+                            mode="markers",
+                            marker=dict(symbol="triangle-up", size=12, color="cyan", line=dict(width=1, color="black")),
+                            name="Entry",
+                        )
+                    )
+                if oxi is not None and 0 <= oxi < len(ddt):
+                    fig_o.add_trace(
+                        go.Scatter(
+                            x=[ddt.iloc[oxi]],
+                            y=[t["Exit"]],
+                            mode="markers",
+                            marker=dict(symbol="diamond", size=10, color="gold", line=dict(width=1, color="orange")),
+                            name="Exit",
+                        )
+                    )
+                _net = float(t["P/L"])
+                _gross = float(t.get("P/L gross", _net))
+                _txn = float(t.get("Txn cost", 0.0))
+                _tp = t.get("Target prem.")
+                _sp = t.get("Stop prem.")
+                if _tp is not None and not pd.isna(_tp):
+                    fig_o.add_hline(
+                        y=float(_tp),
+                        line_dash="dash",
+                        line_color="rgba(34,197,94,0.85)",
+                        annotation_text="Target",
+                        annotation_position="right",
+                    )
+                if _sp is not None and not pd.isna(_sp):
+                    fig_o.add_hline(
+                        y=float(_sp),
+                        line_dash="dash",
+                        line_color="rgba(239,68,68,0.85)",
+                        annotation_text="Stop",
+                        annotation_position="right",
+                    )
+                fig_o.update_layout(
+                    title=dict(
+                        text=(
+                            f"{t['Leg']} @ {t.get('Strike', 0):,.0f} · Net ₹{_net:+,.2f} "
+                            f"(gross ₹{_gross:+,.2f} − txn ₹{_txn:,.0f}) · {t['Closed at']}"
+                        ),
+                        font=dict(color=pl_title_color(_net), size=13),
+                    ),
+                    height=320,
+                    xaxis_rangeslider_visible=False,
+                )
+                st.plotly_chart(fig_o, use_container_width=True, key=f"{_kpre}_opt")
+            else:
+                st.markdown("**Option premium**")
+                st.info(
+                    "No mock option trade for this session (no signal, data error, or below 1 lot). "
+                    f"See the row in the table {table_relative} for the exact reason."
+                )
+
+
 def _abbrev_pl_html(x: float) -> str:
     """Abbreviated P/L with native hover (title) showing full ₹ precision."""
     full = html.escape(f"₹{x:+,.2f}")
@@ -61,6 +278,50 @@ def _abbrev_pl_html(x: float) -> str:
     else:
         col = "#64748b"
     return f'<span title="{full}" style="color:{col};font-weight:600">{short}</span>'
+
+
+def _fo_table_formatters() -> dict:
+    return {
+        "Strike": "{:,.0f}",
+        "Lots": "{:,.0f}",
+        "Lot size": "{:,.0f}",
+        "Qty": "{:,.0f}",
+        "Entry": "₹{:,.2f}",
+        "Target prem.": "₹{:,.2f}",
+        "Stop prem.": "₹{:,.2f}",
+        "Txn cost": "₹{:,.2f}",
+        "P/L gross": "₹{:+,.2f}",
+        "Exit": "₹{:,.2f}",
+        "P/L": "₹{:+,.2f}",
+        "Value": "₹{:,.2f}",
+    }
+
+
+def _fo_rows_to_styled_dataframe(rows: list[dict]) -> tuple[pd.DataFrame, float, int, pd.DataFrame]:
+    """Build display frame, total P/L, signal count, and subset with Lots > 0."""
+    disp_rows = []
+    for r in rows:
+        row = {k: r[k] for k in FO_OPTIONS_DETAIL_COLS if k in r}
+        sd = row.get("Session date")
+        if sd is not None and hasattr(sd, "isoformat"):
+            row["Session date"] = sd.isoformat()
+        disp_rows.append(row)
+    df = pd.DataFrame(disp_rows)
+    if df.empty:
+        return df, 0.0, 0, df
+    if "Lots" in df.columns:
+        lots_num = pd.to_numeric(df["Lots"], errors="coerce").fillna(0)
+        traded = df[lots_num > 0]
+    else:
+        traded = df
+    sum_pl = float(
+        pd.to_numeric(df["P/L"], errors="coerce").fillna(0).sum() if "P/L" in df.columns else 0.0
+    )
+    if "Signal" in df.columns:
+        n_sig = int((df["Signal"].fillna("—").astype(str) != "—").sum())
+    else:
+        n_sig = 0
+    return df, sum_pl, n_sig, traded
 
 
 def render_fo_options(kite):
@@ -104,6 +365,28 @@ def render_fo_options(kite):
         "P/L **net** = gross premium P/L − (brokerage + tax) × 1 lot."
     )
 
+    with st.expander("NSE **index options** — reference (cash-settled, European-style)", expanded=False):
+        st.markdown(
+            """
+**Index options** use an **index** (not a single stock) as the underlying. On NSE they are **cash-settled**
+and are common for hedging and volatility trading.
+
+| Index | Liquidity | Volatility | Typical use |
+| :--- | :--- | :--- | :--- |
+| **NIFTY 50** | Very high | Medium | Balanced / hedging |
+| **BANK NIFTY** | Very high | Very high | Short-term / aggressive |
+| **FINNIFTY** | High | Medium | Financials sector |
+| **MIDCP NIFTY** | Growing | Medium–high | Midcap exposure |
+| **NIFTY NEXT 50** | Lower | Medium | Niche / longer horizon |
+
+**In this app:** pick an index from the **Underlying** dropdown (`NIFTY`, `BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY`, `NIFTYNXT50`).
+Weekly and monthly expiries exist on the exchange; we pick the **nearest NFO expiry on or after** the session date.
+
+**Note:** Lot sizes and exact NSE index **spot** symbols come from Kite’s instrument master. If a new index fails to load,
+check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAMES`).
+            """
+        )
+
     nav1, nav2, nav3, nav4, nav5, nav6 = st.columns(6)
     with nav1:
         if st.button("Intraday home", key="fo_nav_all10"):
@@ -139,10 +422,11 @@ def render_fo_options(kite):
     _ndef = "NIFTY" if "NIFTY" in FO_UNDERLYING_OPTIONS else FO_UNDERLYING_OPTIONS[0]
     _u_idx = FO_UNDERLYING_OPTIONS.index(_ndef) if _ndef in FO_UNDERLYING_OPTIONS else 0
     underlying = st.selectbox(
-        "Underlying (one scrip at a time)",
+        "Underlying (index or Nifty 50 stock)",
         options=FO_UNDERLYING_OPTIONS,
         index=_u_idx,
         key="fo_underlying_single",
+        format_func=_fo_underlying_select_label,
     )
     strategy_choice = st.selectbox(
         "Underlying strategy",
@@ -160,10 +444,15 @@ def render_fo_options(kite):
         max_value=date_max,
         key="fo_date",
     )
+    _int_idx = (
+        intraday_intervals.index(DEFAULT_INTRADAY_INTERVAL)
+        if DEFAULT_INTRADAY_INTERVAL in intraday_intervals
+        else 0
+    )
     chosen_interval = st.selectbox(
         "Minute interval",
         options=intraday_intervals,
-        index=intraday_intervals.index("5minute"),
+        index=_int_idx,
         key="fo_interval",
     )
     if strategy_is_envelope:
@@ -248,30 +537,34 @@ def render_fo_options(kite):
     )
     manual_strike_val = float(manual_strike_raw) if manual_strike_raw and float(manual_strike_raw) > 0 else None
 
-    name = symbol_to_name.get(underlying, underlying) if underlying not in ("NIFTY", "BANKNIFTY") else underlying
+    name = _fo_display_name(symbol_to_name, underlying)
+
+    _fo_common_kw = {
+        "kite": kite,
+        "nse_instruments": nse,
+        "nfo_instruments": nfo,
+        "session_date": chosen_date,
+        "chosen_interval": chosen_interval,
+        "strategy_is_envelope": strategy_is_envelope,
+        "envelope_pct": envelope_pct,
+        "strategy_choice": strategy_choice,
+        "steps_from_atm": steps_from_atm,
+        "strike_policy_label": strike_policy_label,
+        "manual_strike_val": manual_strike_val,
+        "brokerage_per_lot_rt": brokerage_per_lot_rt,
+        "taxes_per_lot_rt": taxes_per_lot_rt,
+        "option_stop_loss_pct": option_stop_loss_pct,
+    }
 
     rows_out: list[dict] = []
 
     with st.spinner(f"Running {strategy_choice} + options for **{underlying}** on **{chosen_date}**..."):
         rows_out.append(
             run_fo_underlying_one_day(
-                kite=kite,
-                nse_instruments=nse,
-                nfo_instruments=nfo,
                 underlying=underlying,
                 name=name,
-                session_date=chosen_date,
-                chosen_interval=chosen_interval,
-                strategy_is_envelope=strategy_is_envelope,
-                envelope_pct=envelope_pct,
-                strategy_choice=strategy_choice,
-                steps_from_atm=steps_from_atm,
-                strike_policy_label=strike_policy_label,
-                manual_strike_val=manual_strike_val,
-                brokerage_per_lot_rt=brokerage_per_lot_rt,
-                taxes_per_lot_rt=taxes_per_lot_rt,
                 include_chart_data=True,
-                option_stop_loss_pct=option_stop_loss_pct,
+                **_fo_common_kw,
             )
         )
 
@@ -409,207 +702,29 @@ def render_fo_options(kite):
     )
     sk_render = "envelope" if strategy_is_envelope else "ma"
     for r in rows_out:
-        df_u = r.get("df_u")
-        if df_u is None:
-            continue
-        u = r["Underlying"]
-        nm = r["Name"]
-        t = r.get("trade")
-        df_o = r.get("df_o")
-        if t:
-            _stk = t.get("Strike")
-            _sk = ""
-            if _stk is not None and not pd.isna(_stk):
-                _sk = f" @{float(_stk):,.0f}"
-            exp_sub = f"{t['Leg']}{_sk} `{t['Option']}`"
-        else:
-            note = str(r.get("Note", "No option trade"))
-            exp_sub = (note[:72] + "…") if len(note) > 72 else note
-        cap = (t.get("why") if t else None) or r.get("_analysis_text") or r.get("Note", "")
-        with st.expander(f"**{u}** — {nm} · {exp_sub}", expanded=False):
-            st.caption(cap)
-            c1, c2 = st.columns(2)
-            with c1:
-                if sk_render == "envelope":
-                    st.markdown("**Underlying + envelope**")
-                    spot_title = "Spot (envelope)"
-                else:
-                    st.markdown("**Underlying + EMA crossover**")
-                    spot_title = f"Spot (EMA {MA_EMA_FAST}/{MA_EMA_SLOW})"
-                fig_u = go.Figure()
-                fig_u.add_trace(
-                    go.Candlestick(
-                        x=df_u["date"],
-                        open=df_u["open"],
-                        high=df_u["high"],
-                        low=df_u["low"],
-                        close=df_u["close"],
-                        name="Underlying",
-                    )
-                )
-                if sk_render == "envelope":
-                    add_ma_envelope_line_traces(fig_u, df_u, ema_period=ENVELOPE_EMA_PERIOD, pct=envelope_pct)
-                else:
-                    add_ma_ema_line_traces(fig_u, df_u)
-                _ei_raw = (t.get("entry_bar_idx") if t else None) or r.get("_chart_entry_bar_idx")
-                try:
-                    ei = int(_ei_raw) if _ei_raw is not None else None
-                except (TypeError, ValueError):
-                    ei = None
-                sig_m = (t.get("Signal") if t else None) or r.get("_chart_spot_signal")
-                du = df_u["date"]
-                if (
-                    ei is not None
-                    and sig_m in ("BUY", "SELL")
-                    and 0 <= ei < len(du)
-                ):
-                    fig_u.add_trace(
-                        go.Scatter(
-                            x=[du.iloc[ei]],
-                            y=[float(df_u.iloc[ei]["close"])],
-                            mode="markers",
-                            marker=dict(
-                                symbol="triangle-up" if sig_m == "BUY" else "triangle-down",
-                                size=14,
-                                color="lime" if sig_m == "BUY" else "tomato",
-                                line=dict(width=1, color="black"),
-                            ),
-                            name=sig_m,
-                        )
-                    )
-                fig_u.update_layout(
-                    title=spot_title,
-                    height=320,
-                    xaxis_rangeslider_visible=False,
-                )
-                st.plotly_chart(fig_u, use_container_width=True)
-            with c2:
-                if t and df_o is not None and not df_o.empty:
-                    st.markdown("**Option premium (mock exit)**")
-                    fig_o = go.Figure()
-                    fig_o.add_trace(
-                        go.Candlestick(
-                            x=df_o["date"],
-                            open=df_o["open"],
-                            high=df_o["high"],
-                            low=df_o["low"],
-                            close=df_o["close"],
-                            name=t["Option"],
-                        )
-                    )
-                    oei = t.get("opt_entry_idx")
-                    oxi = t.get("exit_bar_idx")
-                    ddt = df_o["date"]
-                    if oei is not None and 0 <= oei < len(ddt):
-                        fig_o.add_trace(
-                            go.Scatter(
-                                x=[ddt.iloc[oei]],
-                                y=[t["Entry"]],
-                                mode="markers",
-                                marker=dict(symbol="triangle-up", size=12, color="cyan", line=dict(width=1, color="black")),
-                                name="Entry",
-                            )
-                        )
-                    if oxi is not None and 0 <= oxi < len(ddt):
-                        fig_o.add_trace(
-                            go.Scatter(
-                                x=[ddt.iloc[oxi]],
-                                y=[t["Exit"]],
-                                mode="markers",
-                                marker=dict(symbol="diamond", size=10, color="gold", line=dict(width=1, color="orange")),
-                                name="Exit",
-                            )
-                        )
-                    _net = float(t["P/L"])
-                    _gross = float(t.get("P/L gross", _net))
-                    _txn = float(t.get("Txn cost", 0.0))
-                    _tp = t.get("Target prem.")
-                    _sp = t.get("Stop prem.")
-                    if _tp is not None and not pd.isna(_tp):
-                        fig_o.add_hline(
-                            y=float(_tp),
-                            line_dash="dash",
-                            line_color="rgba(34,197,94,0.85)",
-                            annotation_text="Target",
-                            annotation_position="right",
-                        )
-                    if _sp is not None and not pd.isna(_sp):
-                        fig_o.add_hline(
-                            y=float(_sp),
-                            line_dash="dash",
-                            line_color="rgba(239,68,68,0.85)",
-                            annotation_text="Stop",
-                            annotation_position="right",
-                        )
-                    fig_o.update_layout(
-                        title=dict(
-                            text=(
-                                f"{t['Leg']} @ {t.get('Strike', 0):,.0f} · Net ₹{_net:+,.2f} "
-                                f"(gross ₹{_gross:+,.2f} − txn ₹{_txn:,.0f}) · {t['Closed at']}"
-                            ),
-                            font=dict(color=pl_title_color(_net), size=13),
-                        ),
-                        height=320,
-                        xaxis_rangeslider_visible=False,
-                    )
-                    st.plotly_chart(fig_o, use_container_width=True)
-                else:
-                    st.markdown("**Option premium**")
-                    st.info(
-                        "No mock option trade for this session (no signal, data error, or below 1 lot). "
-                        "See the summary table below for the exact reason."
-                    )
+        _u = str(r.get("Underlying", "row"))
+        _fo_expander_charts_single_row(
+            r,
+            chart_key_prefix=f"fo_main_{_u}",
+            sk_render=sk_render,
+            envelope_pct=envelope_pct,
+            expanded=False,
+            table_relative="below",
+        )
 
     st.markdown("### Selected session (detail row)")
-    display_cols = [
-        "Session date",
-        "Underlying",
-        "Name",
-        "Strategy",
-        "Leg",
-        "Option",
-        "Strike",
-        "Strike pick",
-        "Note",
-        "Signal",
-        "Lots",
-        "Lot size",
-        "Qty",
-        "Entry",
-        "Target prem.",
-        "Stop prem.",
-        "Txn cost",
-        "P/L gross",
-        "Closed at",
-        "Exit",
-        "P/L",
-        "Value",
-    ]
     disp_rows = []
     for r in rows_out:
-        row = {k: r[k] for k in display_cols if k in r}
+        row = {k: r[k] for k in FO_OPTIONS_DETAIL_COLS if k in r}
         sd = row.get("Session date")
         if sd is not None and hasattr(sd, "isoformat"):
             row["Session date"] = sd.isoformat()
         disp_rows.append(row)
     disp = pd.DataFrame(disp_rows)
     if not disp.empty:
-        fmt = {
-            "Strike": "{:,.0f}",
-            "Lots": "{:,.0f}",
-            "Lot size": "{:,.0f}",
-            "Qty": "{:,.0f}",
-            "Entry": "₹{:,.2f}",
-            "Target prem.": "₹{:,.2f}",
-            "Stop prem.": "₹{:,.2f}",
-            "Txn cost": "₹{:,.2f}",
-            "P/L gross": "₹{:+,.2f}",
-            "Exit": "₹{:,.2f}",
-            "P/L": "₹{:+,.2f}",
-            "Value": "₹{:,.2f}",
-        }
+        _fmt = _fo_table_formatters()
         styled = style_pl_dataframe(
-            disp.style.format(fmt, na_rep="—"),
+            disp.style.format(_fmt, na_rep="—"),
             "P/L",
             "P/L gross",
         )
@@ -617,6 +732,131 @@ def render_fo_options(kite):
     if trade_rows:
         _tpl = sum(t["P/L"] for t in trade_rows)
         st.markdown(f"**Session net P/L (if trade executed):** {pl_markdown(_tpl)}")
+
+    st.divider()
+    st.markdown("### All scrips — same strategy parameters")
+    st.caption(
+        "Mock trade per underlying in **FO_UNDERLYING_OPTIONS** using the **session date**, **minute interval**, "
+        "**underlying strategy**, **strike policy**, **manual strike**, **stop %**, and **per-lot costs** above. "
+        "**Load / refresh** pulls underlying + option history for every scrip (slow, large session cache) and "
+        "enables the chart expanders below. Top-of-page charts still reflect only the **Underlying** dropdown."
+    )
+    _all_cache = st.session_state.get("fo_all_scrips_cache")
+    if _all_cache and _all_cache.get("fp") != fp_now:
+        st.warning("All-scrips table was built with different parameters. Click **Load / refresh all scrips** to update.")
+    _refresh_all = st.button("Load / refresh all scrips", key="fo_all_scrips_refresh")
+    if _refresh_all:
+        _all_rows: list[dict] = []
+        with st.spinner(
+            f"Fetching all {len(FO_UNDERLYING_OPTIONS)} underlyings (hist + option mock + chart data) — may take several minutes…"
+        ):
+            for u in FO_UNDERLYING_OPTIONS:
+                nm = _fo_display_name(symbol_to_name, u)
+                if u == underlying:
+                    _all_rows.append(dict(rows_out[0]))
+                else:
+                    _all_rows.append(
+                        run_fo_underlying_one_day(
+                            underlying=u,
+                            name=nm,
+                            include_chart_data=True,
+                            **_fo_common_kw,
+                        )
+                    )
+        st.session_state["fo_all_scrips_cache"] = {"fp": fp_now, "rows": _all_rows}
+
+    _show_all = st.session_state.get("fo_all_scrips_cache")
+    if _show_all and _show_all.get("fp") == fp_now and _show_all.get("rows"):
+        _arows = _show_all["rows"]
+        _df_all, _sum_pl, _n_sig, _traded = _fo_rows_to_styled_dataframe(_arows)
+        if not _df_all.empty:
+            st.metric(
+                "All-scrips net P/L (sum of mock trades)",
+                _abbrev_rupee(_sum_pl),
+                help=f"Full: ₹{_sum_pl:+,.2f}. Rows with a signal: {_n_sig}.",
+            )
+            _styled_all = style_pl_dataframe(
+                _df_all.style.format(_fo_table_formatters(), na_rep="—"),
+                "P/L",
+                "P/L gross",
+            )
+            st.dataframe(_styled_all, use_container_width=True, hide_index=True)
+            st.caption(f"{len(_df_all)} underlyings · {len(_traded)} with executed mock position (Lots > 0)")
+            st.markdown("#### Charts & trade details per scrip")
+            st.caption("Expand each row for underlying + option candles, entry/exit markers, target/stop lines, and rationale.")
+            for _ai, r in enumerate(_arows):
+                _u = str(r.get("Underlying", f"r{_ai}"))
+                _fo_expander_charts_single_row(
+                    r,
+                    chart_key_prefix=f"fo_all_{_ai}_{_u}",
+                    sk_render=sk_render,
+                    envelope_pct=envelope_pct,
+                    expanded=False,
+                    table_relative="above",
+                )
+    elif not _refresh_all:
+        st.info("Click **Load / refresh all scrips** to build the full-universe table and per-scrip charts.")
+
+    st.divider()
+    st.markdown("### Index underlyings (all NSE index keys) — same parameters")
+    st.caption(
+        f"Index **F&O** only: **{', '.join(FO_INDEX_UNDERLYING_KEYS)}** with the same session and strategy settings. "
+        "Uses a separate **Load / refresh** so you can inspect indices without running the full stock universe."
+    )
+    _ix_cache = st.session_state.get("fo_index_scrips_cache")
+    if _ix_cache and _ix_cache.get("fp") != fp_now:
+        st.warning(
+            "Index table was built with different parameters. Click **Load / refresh index underlyings** to update."
+        )
+    _refresh_ix = st.button("Load / refresh index underlyings", key="fo_index_scrips_refresh")
+    if _refresh_ix:
+        _ix_rows: list[dict] = []
+        with st.spinner(f"Index suite ({len(FO_DEFAULT_UNDERLYINGS)} underlyings) — mock F&O with chart data…"):
+            for u in FO_DEFAULT_UNDERLYINGS:
+                nm = _fo_display_name(symbol_to_name, u)
+                if u == underlying:
+                    _ix_rows.append(dict(rows_out[0]))
+                else:
+                    _ix_rows.append(
+                        run_fo_underlying_one_day(
+                            underlying=u,
+                            name=nm,
+                            include_chart_data=True,
+                            **_fo_common_kw,
+                        )
+                    )
+        st.session_state["fo_index_scrips_cache"] = {"fp": fp_now, "rows": _ix_rows}
+
+    _show_ix = st.session_state.get("fo_index_scrips_cache")
+    if _show_ix and _show_ix.get("fp") == fp_now and _show_ix.get("rows"):
+        _irows = _show_ix["rows"]
+        _df_ix, _sum_ix, _n_sig_ix, _traded_ix = _fo_rows_to_styled_dataframe(_irows)
+        if not _df_ix.empty:
+            st.metric(
+                "Index underlyings net P/L (sum)",
+                _abbrev_rupee(_sum_ix),
+                help=f"Full: ₹{_sum_ix:+,.2f}. Rows with a signal: {_n_sig_ix}.",
+            )
+            _styled_ix = style_pl_dataframe(
+                _df_ix.style.format(_fo_table_formatters(), na_rep="—"),
+                "P/L",
+                "P/L gross",
+            )
+            st.dataframe(_styled_ix, use_container_width=True, hide_index=True)
+            st.caption(f"{len(_df_ix)} index underlyings · {len(_traded_ix)} with executed mock position (Lots > 0)")
+        st.markdown("#### Charts & trade details (index)")
+        for _ii, r in enumerate(_irows):
+            _u = str(r.get("Underlying", f"r{_ii}"))
+            _fo_expander_charts_single_row(
+                r,
+                chart_key_prefix=f"fo_idx_{_ii}_{_u}",
+                sk_render=sk_render,
+                envelope_pct=envelope_pct,
+                expanded=False,
+                table_relative="above",
+            )
+    elif not _refresh_ix:
+        st.info("Click **Load / refresh index underlyings** for the index suite table and charts.")
 
     _last_path = st.session_state.get("fo_options_last_saved_path")
     if _last_path:

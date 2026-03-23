@@ -74,7 +74,7 @@ def main():
                 st.session_state.kite = None
                 st.session_state.selected_symbol = None
                 st.session_state.nse_instruments = None
-                st.session_state.view = "all10"
+                st.session_state.view = "fo_options"
                 st.session_state.pop("etf_cache_rows", None)
                 st.session_state.pop("etf_cache_charts", None)
                 st.session_state.pop("nfo_instruments", None)

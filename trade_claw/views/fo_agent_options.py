@@ -10,6 +10,7 @@ import streamlit as st
 
 from trade_claw.constants import (
     DEFAULT_INTERVALS,
+    DEFAULT_INTRADAY_INTERVAL,
     ENVELOPE_EMA_PERIOD,
     ENVELOPE_PCT,
     FO_BROKERAGE_PER_LOT_RT_DEFAULT,
@@ -17,6 +18,7 @@ from trade_claw.constants import (
     FO_ENVELOPE_BANDWIDTH_MAX_PCT,
     FO_ENVELOPE_BANDWIDTH_MIN_PCT,
     FO_ENVELOPE_BANDWIDTH_STEP,
+    FO_INDEX_UNDERLYING_LABELS,
     FO_OPTION_STOP_LOSS_PCT,
     FO_OPTION_TARGET_PCT,
     FO_STRATEGY_ENVELOPE,
@@ -35,6 +37,12 @@ from trade_claw.pl_style import pl_markdown, pl_title_color
 from trade_claw.strategies import add_ma_ema_line_traces, add_ma_envelope_line_traces
 
 _default_model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
+
+
+def _foa_underlying_select_label(u: str) -> str:
+    if u in FO_INDEX_UNDERLYING_LABELS:
+        return f"{FO_INDEX_UNDERLYING_LABELS[u]} — `{u}`"
+    return u
 
 
 def _abbrev_rupee(x: float) -> str:
@@ -140,10 +148,11 @@ def render_fo_agent_options(kite):
     _ndef = "NIFTY" if "NIFTY" in FO_UNDERLYING_OPTIONS else FO_UNDERLYING_OPTIONS[0]
     _u_idx = FO_UNDERLYING_OPTIONS.index(_ndef) if _ndef in FO_UNDERLYING_OPTIONS else 0
     underlying = st.selectbox(
-        "Underlying",
+        "Underlying (index or Nifty 50 stock)",
         options=FO_UNDERLYING_OPTIONS,
         index=_u_idx,
         key="foa_underlying",
+        format_func=_foa_underlying_select_label,
     )
 
     strategy_choice = st.selectbox(
@@ -162,10 +171,15 @@ def render_fo_agent_options(kite):
         max_value=session_upper,
         key="foa_date",
     )
+    _int_idx = (
+        intraday_intervals.index(DEFAULT_INTRADAY_INTERVAL)
+        if DEFAULT_INTRADAY_INTERVAL in intraday_intervals
+        else 0
+    )
     chosen_interval = st.selectbox(
         "Minute interval",
         options=intraday_intervals,
-        index=intraday_intervals.index("5minute"),
+        index=_int_idx,
         key="foa_interval",
     )
 
@@ -215,7 +229,10 @@ def render_fo_agent_options(kite):
 
     load = st.button("Load / run agent", type="primary", key="foa_load")
 
-    name = symbol_to_name.get(underlying, underlying) if underlying not in ("NIFTY", "BANKNIFTY") else underlying
+    if underlying in FO_INDEX_UNDERLYING_LABELS:
+        name = str(FO_INDEX_UNDERLYING_LABELS[underlying]).split("(")[0].strip()
+    else:
+        name = symbol_to_name.get(underlying, underlying)
 
     if load and api_key:
         k_api, _k_sec = get_kite_credentials()

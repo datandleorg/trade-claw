@@ -24,6 +24,7 @@ from trade_claw.fo_support import (
     align_option_entry_bar,
     fetch_underlying_intraday,
     filter_options_by_underlying,
+    nfo_index_name_set,
     pick_option_contract,
     _to_date,
 )
@@ -357,10 +358,9 @@ def _mcp_row_matches_underlying(row: dict[str, Any], u: str) -> bool:
     name = (row.get("name") or "").upper().strip()
     ts = (row.get("tradingsymbol") or "").upper()
     uu = u.upper().strip()
-    if uu == "NIFTY":
-        return name == "NIFTY"
-    if uu == "BANKNIFTY":
-        return name == "BANKNIFTY"
+    idx = nfo_index_name_set(uu)
+    if idx is not None:
+        return name in idx
     return name == uu or ts.startswith(uu)
 
 

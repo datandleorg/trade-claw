@@ -10,6 +10,7 @@ from trade_claw.constants import (
     ALLOCATED_AMOUNT,
     CLOSED_AT_REALISED,
     DEFAULT_INTERVALS,
+    DEFAULT_INTRADAY_INTERVAL,
     ENVELOPE_EMA_PERIOD,
     ENVELOPE_PCT,
     NIFTY50_DEFAULT_SELECTED,
@@ -70,10 +71,15 @@ def render_all_ten(kite):
         value=datetime(2026, 3, 16).date(),
         key="all10_date",
     )
+    _int_idx = (
+        intraday_intervals.index(DEFAULT_INTRADAY_INTERVAL)
+        if DEFAULT_INTRADAY_INTERVAL in intraday_intervals
+        else 0
+    )
     chosen_interval = st.selectbox(
         "Minute interval",
         options=intraday_intervals,
-        index=intraday_intervals.index("5minute"),
+        index=_int_idx,
         key="all10_interval",
     )
     st.caption("Changing date, interval or stocks reloads data and reruns strategy analysis.")
