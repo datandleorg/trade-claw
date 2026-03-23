@@ -356,15 +356,6 @@ def render_fo_options(kite):
         "Each time you **change parameters**, the run is saved under **`data/fo_options_runs/`** (JSON) for analysis — "
         "see **`FO_OPTIONS_RUNS_DIR`** in `.env.example` to override the folder."
     )
-    st.caption(
-        "**Envelope:** first **close** above upper / below lower band (not wick-only). "
-        "→ long ATM **CE** / **PE**. **EMA cross:** first golden / death cross in session → **CE** / **PE**. "
-        "No short options. Exit: **target** = premium **+"
-        f"{100 * FO_OPTION_TARGET_PCT:.0f}%** on bar **high**; **stop** = drop from entry on bar **low** (see slider); else **EOD**. "
-        "Mock size: **always 1 lot** per symbol (exchange `lot_size` × premium). "
-        "P/L **net** = gross premium P/L − (brokerage + tax) × 1 lot."
-    )
-
     with st.expander("NSE **index options** — reference (cash-settled, European-style)", expanded=False):
         st.markdown(
             """
@@ -497,20 +488,47 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
             help="STT, stamp, exchange—your lump sum per lot for the full round trip.",
         )
 
+    _tg_default = float(min(200.0, max(0.5, round(100 * FO_OPTION_TARGET_PCT, 2))))
     _sl_default = float(min(50.0, max(0.0, round(100 * FO_OPTION_STOP_LOSS_PCT, 2))))
-    option_stop_loss_pct_ui = st.slider(
-        "Stop loss below entry (premium %)",
-        min_value=0.0,
-        max_value=50.0,
-        value=_sl_default,
-        step=0.5,
-        key="fo_option_stop_loss_pct_ui",
-        help=(
-            "**0** = no stop (only target or EOD). Otherwise exit when option bar **low** ≤ entry × (1 − %/100). "
-            "Same-bar as target: **target wins** (same rule as cash BUY in this app)."
-        ),
-    )
+    sl1, sl2 = st.columns(2)
+    with sl1:
+        option_target_pct_ui = st.slider(
+            "Target above entry (premium %)",
+            min_value=0.5,
+            max_value=200.0,
+            value=_tg_default,
+            step=0.5,
+            key="fo_option_target_pct_ui",
+            help=(
+                "Exit when option bar **high** ≥ entry × (1 + %/100). "
+                f"Default from env **`FO_OPTION_TARGET_PCT`** ({100 * FO_OPTION_TARGET_PCT:.1f}%). "
+                "Same-bar as stop: **target wins**."
+            ),
+        )
+    with sl2:
+        option_stop_loss_pct_ui = st.slider(
+            "Stop loss below entry (premium %)",
+            min_value=0.0,
+            max_value=50.0,
+            value=_sl_default,
+            step=0.5,
+            key="fo_option_stop_loss_pct_ui",
+            help=(
+                "**0** = no stop (only target or EOD). Otherwise exit when option bar **low** ≤ entry × (1 − %/100). "
+                "Same-bar as target: **target wins** (same rule as cash BUY in this app)."
+            ),
+        )
+    option_target_pct = option_target_pct_ui / 100.0
     option_stop_loss_pct = option_stop_loss_pct_ui / 100.0
+
+    st.caption(
+        "**Envelope:** first **close** above upper / below lower band (not wick-only). "
+        "→ long ATM **CE** / **PE**. **EMA cross:** first golden / death cross in session → **CE** / **PE**. "
+        "No short options. Exit: **target** = premium **+"
+        f"{option_target_pct_ui:.1f}%** on bar **high**; **stop** = **−{option_stop_loss_pct_ui:.1f}%** on bar **low** (0% = no stop); else **EOD**. "
+        "Mock size: **always 1 lot** per symbol (exchange `lot_size` × premium). "
+        "P/L **net** = gross premium P/L − (brokerage + tax) × 1 lot."
+    )
 
     strike_policy_label = st.selectbox(
         "Option strike vs spot",
@@ -554,6 +572,7 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
         "brokerage_per_lot_rt": brokerage_per_lot_rt,
         "taxes_per_lot_rt": taxes_per_lot_rt,
         "option_stop_loss_pct": option_stop_loss_pct,
+        "option_target_pct": option_target_pct,
     }
 
     rows_out: list[dict] = []
@@ -592,7 +611,8 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
         "brokerage_per_lot_rt": brokerage_per_lot_rt,
         "taxes_per_lot_rt": taxes_per_lot_rt,
         "option_stop_loss_pct": option_stop_loss_pct,
-        "option_target_pct": FO_OPTION_TARGET_PCT,
+        "option_target_pct": option_target_pct,
+        "option_target_pct_default_constant": FO_OPTION_TARGET_PCT,
         "option_stop_loss_pct_default_constant": FO_OPTION_STOP_LOSS_PCT,
         "strike_policy_label": strike_policy_label,
         "steps_from_atm": steps_from_atm,
@@ -674,7 +694,7 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
     if strategy_is_envelope:
         st.caption(
             f"Strategy: **{FO_STRATEGY_ENVELOPE}** — EMA{ENVELOPE_EMA_PERIOD} ±{envelope_bw_pct:.2f}% · "
-            f"target prem = entry × (1 + {FO_OPTION_TARGET_PCT:.2f})"
+            f"target prem = entry × (1 + {option_target_pct:.2f})"
             + (
                 f", stop prem = entry × (1 − {option_stop_loss_pct:.2f})"
                 if option_stop_loss_pct > 0
@@ -685,7 +705,7 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
     else:
         st.caption(
             f"Strategy: **{FO_STRATEGY_MA_CROSS}** — EMA {MA_EMA_FAST} / {MA_EMA_SLOW} · "
-            f"target prem = entry × (1 + {FO_OPTION_TARGET_PCT:.2f})"
+            f"target prem = entry × (1 + {option_target_pct:.2f})"
             + (
                 f", stop prem = entry × (1 − {option_stop_loss_pct:.2f})"
                 if option_stop_loss_pct > 0
