@@ -84,7 +84,7 @@ ALL10_STRATEGY_OPTIONS = [
 MA_EMA_FAST = 9
 MA_EMA_SLOW = 20
 ENVELOPE_EMA_PERIOD = 20
-ENVELOPE_PCT = 0.002  # 0.2% distance each side of EMA (intraday / F&O envelope default)
+ENVELOPE_PCT = 0.0030  # 0.30% each side of EMA (F&O / intraday UI default + mock engine when env unset)
 
 CLOSED_AT_REALISED = ("Target", "Stop", "Opposite envelope")
 

@@ -2,24 +2,26 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 from datetime import date, datetime, time as dtime
 from zoneinfo import ZoneInfo
 
-from trade_claw.constants import ENVELOPE_EMA_PERIOD
-from trade_claw.fo_support import fetch_underlying_intraday
+from trade_claw.constants import ENVELOPE_EMA_PERIOD, ENVELOPE_PCT, FO_INDEX_UNDERLYING_KEYS
+from trade_claw.fo_support import fetch_underlying_intraday, underlying_index_tradingsymbol
 from trade_claw.strategies import _envelope_series
 
 IST = ZoneInfo("Asia/Kolkata")
+logger = logging.getLogger(__name__)
 
 
 def mock_agent_envelope_pct() -> float:
-    """Bandwidth each side of EMA as decimal (e.g. 0.005 = 0.5%)."""
-    raw = os.environ.get("MOCK_AGENT_ENVELOPE_PCT", "0.002").strip()
+    """Bandwidth each side of EMA as decimal (e.g. ``0.003`` = 0.3% above/below EMA)."""
+    raw = (os.environ.get("MOCK_AGENT_ENVELOPE_PCT") or "").strip()
     if raw:
         return float(raw)
-    return 0.005
+    return float(ENVELOPE_PCT)
 
 
 def mock_agent_slippage_points() -> float:
@@ -61,6 +63,47 @@ def should_force_square_off(dt: datetime) -> bool:
 
 def session_date_ist(dt: datetime) -> date:
     return dt.date()
+
+
+def mock_engine_underlyings() -> list[str]:
+    """
+    Index keys scanned each graph run (envelope on spot 1m), in order.
+    Env ``MOCK_ENGINE_UNDERLYINGS`` = comma-separated subset of ``FO_INDEX_UNDERLYING_KEYS``;
+    default = all five indices.
+    """
+    allowed = frozenset(FO_INDEX_UNDERLYING_KEYS)
+    raw = (os.environ.get("MOCK_ENGINE_UNDERLYINGS") or "").strip()
+    if not raw:
+        return list(FO_INDEX_UNDERLYING_KEYS)
+    out: list[str] = []
+    for part in raw.split(","):
+        p = part.upper().strip()
+        if p in allowed:
+            out.append(p)
+        elif p:
+            logger.warning("MOCK_ENGINE_UNDERLYINGS: unknown key %r ignored", p)
+    return out if out else list(FO_INDEX_UNDERLYING_KEYS)
+
+
+def mock_engine_stop_loss_floor_multiplier() -> float:
+    """
+    When the LLM returns ``stop_loss >= entry``, clamp stop to ``entry * multiplier``.
+    Env ``MOCK_ENGINE_STOP_LOSS_CLAMP_PCT`` = max adverse move as percent of entry (default **30**
+    → multiplier **0.70**, i.e. wider stop than the old hard-coded 15%).
+    """
+    raw = (os.environ.get("MOCK_ENGINE_STOP_LOSS_CLAMP_PCT") or "30").strip()
+    try:
+        pct = float(raw)
+    except ValueError:
+        pct = 30.0
+    pct = max(5.0, min(90.0, pct))
+    return max(0.05, 1.0 - pct / 100.0)
+
+
+def nse_index_ltp_symbol(underlying_key: str) -> str | None:
+    """Kite LTP instrument key, e.g. ``NSE:NIFTY 50`` for ``NIFTY``."""
+    ts = underlying_index_tradingsymbol(underlying_key.upper().strip())
+    return f"NSE:{ts}" if ts else None
 
 
 def envelope_breakout_on_last_bar(
@@ -131,15 +174,20 @@ def envelope_breakout_on_last_bar(
     return True, text, sig
 
 
-def load_nifty_session_minute_df(kite, nse_instruments: list, session_d: date):
-    """Today's (IST) session 09:15–15:30 minute bars for NIFTY spot index."""
+def load_index_session_minute_df(kite, nse_instruments: list, session_d: date, underlying_key: str):
+    """Today's (IST) session 09:15–15:30 minute bars for the index key (``NIFTY``, ``BANKNIFTY``, …)."""
     from_dt = datetime(session_d.year, session_d.month, session_d.day, 9, 15, 0)
     to_dt = datetime(session_d.year, session_d.month, session_d.day, 15, 30, 0)
     from_str = from_dt.strftime("%Y-%m-%d %H:%M:%S")
     to_str = to_dt.strftime("%Y-%m-%d %H:%M:%S")
     return fetch_underlying_intraday(
-        kite, "NIFTY", nse_instruments, from_str, to_str, "minute"
+        kite, underlying_key.upper().strip(), nse_instruments, from_str, to_str, "minute"
     )
+
+
+def load_nifty_session_minute_df(kite, nse_instruments: list, session_d: date):
+    """Today's (IST) session 09:15–15:30 minute bars for NIFTY 50 spot (backward-compatible)."""
+    return load_index_session_minute_df(kite, nse_instruments, session_d, "NIFTY")
 
 
 def top_five_option_instruments(

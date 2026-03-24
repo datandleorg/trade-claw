@@ -68,20 +68,21 @@ def fetch_option_minute_bars_json(
     return json.dumps(rows)
 
 
-def fetch_nifty_minute_bars_json(
+def fetch_index_minute_bars_json(
     kite,
     nse_instruments: list,
     session_d: date,
+    underlying_key: str,
     *,
     max_bars: int,
 ) -> str | None:
-    """Last ``max_bars`` NIFTY 1m session bars (09:15–15:30), same window as option snapshots."""
-    if max_bars <= 0 or not nse_instruments:
+    """Last ``max_bars`` index spot 1m session bars (09:15–15:30), same window as option snapshots."""
+    if max_bars <= 0 or not nse_instruments or not (underlying_key or "").strip():
         return None
     from_str, to_str = _session_bounds(session_d)
     try:
         df, err = fetch_underlying_intraday(
-            kite, "NIFTY", nse_instruments, from_str, to_str, "minute"
+            kite, underlying_key.upper().strip(), nse_instruments, from_str, to_str, "minute"
         )
     except Exception:
         return None
@@ -102,3 +103,16 @@ def fetch_nifty_minute_bars_json(
             }
         )
     return json.dumps(rows)
+
+
+def fetch_nifty_minute_bars_json(
+    kite,
+    nse_instruments: list,
+    session_d: date,
+    *,
+    max_bars: int,
+) -> str | None:
+    """Last ``max_bars`` NIFTY 50 1m session bars (09:15–15:30)."""
+    return fetch_index_minute_bars_json(
+        kite, nse_instruments, session_d, "NIFTY", max_bars=max_bars
+    )

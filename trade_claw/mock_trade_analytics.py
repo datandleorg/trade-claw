@@ -139,5 +139,22 @@ def direction_breakdown(df_closed: pd.DataFrame) -> pd.DataFrame:
     return g.rename(columns={"_dir": "direction"})
 
 
+def index_underlying_breakdown(df_closed: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate closed trades by `index_underlying` (multi-index mock engine)."""
+    if df_closed.empty or "index_underlying" not in df_closed.columns:
+        return pd.DataFrame(columns=["index_underlying", "trades", "total_pnl", "wins"])
+    t = df_closed.copy()
+    t["_ix"] = t["index_underlying"].fillna("—").astype(str).str.strip()
+    t.loc[t["_ix"] == "", "_ix"] = "—"
+    pnl = pd.to_numeric(t["realized_pnl"], errors="coerce").fillna(0.0)
+    t["_pnl"] = pnl
+    g = t.groupby("_ix", as_index=False).agg(
+        trades=("trade_id", "count"),
+        total_pnl=("_pnl", "sum"),
+        wins=("_pnl", lambda s: int((s > 0).sum())),
+    )
+    return g.rename(columns={"_ix": "index_underlying"})
+
+
 def trades_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")

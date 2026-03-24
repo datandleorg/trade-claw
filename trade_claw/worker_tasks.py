@@ -10,6 +10,7 @@ from typing import Literal
 
 from trade_claw import task_store
 from trade_claw.celery_app import app
+from trade_claw.mock_engine_log import scan_error, scan_info
 from trade_claw.event_pubsub import publish_task_event, redis_sync_client
 from langgraph.graph.state import CompiledStateGraph
 
@@ -180,27 +181,35 @@ def llm_joke_agent(
 @app.task(name="trade_claw.scan_mock_market")
 def scan_mock_market() -> dict:
     """Periodic mock Nifty options scan (Celery Beat). See mock_engine_run.run_scan."""
-    logger.info("Celery Beat: scan_mock_market task started")
+    scan_info("celery", "CELERY_TASK scan_mock_market started")
     result = run_scan_safe()
     if result.get("error"):
-        logger.error(
-            "Celery Beat: scan_mock_market finished with error ist=%s err=%s",
+        scan_error(
+            "graph_err",
+            "CELERY_TASK finished ERROR ist=%s err=%s",
             result.get("ist"),
             result.get("error"),
         )
     elif result.get("skipped"):
-        logger.info(
-            "Celery Beat: scan_mock_market finished ist=%s skipped=%s",
+        scan_info(
+            "celery",
+            "CELERY_TASK finished SKIP ist=%s skipped=%s",
             result.get("ist"),
             result.get("skipped"),
         )
     else:
         g = result.get("graph") or {}
-        logger.info(
-            "Celery Beat: scan_mock_market finished ist=%s trade_id=%s graph_error=%s",
+        runs = g.get("runs") if isinstance(g, dict) else None
+        n_runs = len(runs) if isinstance(runs, list) else 0
+        opened = 0
+        if isinstance(runs, list):
+            opened = sum(1 for r in runs if isinstance(r, dict) and r.get("trade_id"))
+        scan_info(
+            "celery",
+            "CELERY_TASK finished OK ist=%s graph_runs=%s new_trade_ids=%s",
             result.get("ist"),
-            g.get("trade_id"),
-            g.get("error"),
+            n_runs,
+            opened,
         )
     return result
 

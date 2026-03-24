@@ -21,6 +21,7 @@ app.conf.update(
     enable_utc=False,
     task_track_started=True,
     beat_schedule={
+        # Once per clock minute (IST), aligned with 1m candle cadence; Streamlit Live tab also refreshes every 1 min.
         "mock-market-scan": {
             "task": "trade_claw.scan_mock_market",
             "schedule": crontab(minute="*", hour="9-15", day_of_week="1-5"),

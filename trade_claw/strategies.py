@@ -305,30 +305,46 @@ def simulate_envelope_trade_close(
     return "EOD", exit_price, pl, last_idx
 
 
-def add_ma_envelope_line_traces(fig, df, ema_period=ENVELOPE_EMA_PERIOD, pct=ENVELOPE_PCT):
+def add_ma_envelope_line_traces(
+    fig,
+    df,
+    ema_period=ENVELOPE_EMA_PERIOD,
+    pct=ENVELOPE_PCT,
+    *,
+    include_price_bands: bool = True,
+    row: int | None = None,
+    col: int | None = None,
+):
     if df is None or df.empty or len(df) < ema_period:
         return
     x = df["date"]
     center, upper, lower = _envelope_series(df, ema_period, pct)
     pct_label = f"{100 * pct:.1f}%"
-    fig.add_trace(
-        go.Scatter(
-            x=x,
-            y=upper,
-            mode="lines",
-            name=f"Upper (+{pct_label})",
-            line=dict(color="rgba(0, 200, 100, 0.85)", width=1.5, dash="dash"),
+    subplot_kw: dict[str, int] = {}
+    if row is not None:
+        subplot_kw["row"] = row
+        subplot_kw["col"] = col if col is not None else 1
+    if include_price_bands:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=upper,
+                mode="lines",
+                name=f"Upper (+{pct_label})",
+                line=dict(color="rgba(0, 200, 100, 0.85)", width=1.5, dash="dash"),
+            ),
+            **subplot_kw,
         )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=x,
-            y=lower,
-            mode="lines",
-            name=f"Lower (−{pct_label})",
-            line=dict(color="rgba(255, 80, 80, 0.85)", width=1.5, dash="dash"),
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=lower,
+                mode="lines",
+                name=f"Lower (−{pct_label})",
+                line=dict(color="rgba(255, 80, 80, 0.85)", width=1.5, dash="dash"),
+            ),
+            **subplot_kw,
         )
-    )
     fig.add_trace(
         go.Scatter(
             x=x,
@@ -337,7 +353,8 @@ def add_ma_envelope_line_traces(fig, df, ema_period=ENVELOPE_EMA_PERIOD, pct=ENV
             name=f"EMA {ema_period}",
             line=dict(color="#ff9f1a", width=2),
             opacity=0.95,
-        )
+        ),
+        **subplot_kw,
     )
 
 
