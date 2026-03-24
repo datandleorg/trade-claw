@@ -66,6 +66,35 @@ uv run streamlit run app.py
   ngrok http --url=joesph-nonalliterative-nelida.ngrok-free.dev 8501
   ```
 
+## Docker Compose (sample)
+
+This sample stack runs all app components together:
+- `streamlit` (UI on port `8501`)
+- `celery-worker`
+- `celery-beat`
+- `redis` (broker/result backend)
+
+1. Build and start:
+   ```bash
+   docker compose up --build
+   ```
+2. Open Streamlit at `http://localhost:8501`.
+3. Stop:
+   ```bash
+   docker compose down
+   ```
+
+If you want to remove Redis data volumes/images used by the stack:
+```bash
+docker compose down -v --rmi local
+```
+
+To expose Streamlit publicly with the included `ngrok` service:
+- add `NGROK_AUTHTOKEN=...` in `.env`
+- run `docker compose up -d`
+- this stack uses your reserved domain: `https://joesph-nonalliterative-nelida.ngrok-free.dev`
+- optional ngrok inspector is available at `http://localhost:4040`
+
 ## Project layout
 
 | Path | Role |

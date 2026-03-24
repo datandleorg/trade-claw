@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+.cursor
+.DS_Store
+data
+logs
+agent-transcripts
+*.db
+*.sqlite
+*.sqlite3
+celerybeat-schedule*
