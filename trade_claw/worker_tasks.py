@@ -14,6 +14,7 @@ from trade_claw.event_pubsub import publish_task_event, redis_sync_client
 from langgraph.graph.state import CompiledStateGraph
 
 from trade_claw.joke_langgraph_agent import DEFAULT_JOKE_MODEL, build_joke_agent_graph
+from trade_claw.mock_engine_run import run_scan_safe
 from trade_claw.task_runtime import pause_key, stop_key
 
 logger = logging.getLogger(__name__)
@@ -174,4 +175,32 @@ def llm_joke_agent(
         each_tick,
         started_extra={"label": label, "model": model, "interval_seconds": interval_seconds},
     )
+
+
+@app.task(name="trade_claw.scan_mock_market")
+def scan_mock_market() -> dict:
+    """Periodic mock Nifty options scan (Celery Beat). See mock_engine_run.run_scan."""
+    logger.info("Celery Beat: scan_mock_market task started")
+    result = run_scan_safe()
+    if result.get("error"):
+        logger.error(
+            "Celery Beat: scan_mock_market finished with error ist=%s err=%s",
+            result.get("ist"),
+            result.get("error"),
+        )
+    elif result.get("skipped"):
+        logger.info(
+            "Celery Beat: scan_mock_market finished ist=%s skipped=%s",
+            result.get("ist"),
+            result.get("skipped"),
+        )
+    else:
+        g = result.get("graph") or {}
+        logger.info(
+            "Celery Beat: scan_mock_market finished ist=%s trade_id=%s graph_error=%s",
+            result.get("ist"),
+            g.get("trade_id"),
+            g.get("error"),
+        )
+    return result
 

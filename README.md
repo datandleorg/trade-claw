@@ -12,6 +12,7 @@ Streamlit app for **Kite Connect** (Zerodha): view top 10 Nifty 50 stocks and hi
 - **F&O Options**: pick **one underlying** and **session date**. **Index options** on the dropdown: **NIFTY**, **BANKNIFTY**, **FINNIFTY**, **MIDCPNIFTY**, **NIFTYNXT50** (Nifty Next 50), plus **Nifty 50 stocks**. **Strike policy** (ATM default = nearest listed strike to spot, plus ITM/OTM steps) and optional **manual strike** override. **Always 1 lot**. Exits: **target**, **stop loss** (slider; env `FO_OPTION_STOP_LOSS_PCT`), or **EOD**. **Net P/L** after ₹/lot costs. Changing any parameter **saves a JSON snapshot** under `data/fo_options_runs/` (`FO_OPTIONS_RUNS_DIR` to override). Sidebar **Navigate → F&O Options**.
 - **F&O snapshots report**: browse saved JSON runs with **session date range**, **script (underlying)** filter, **pagination**, and per-run **tabs** (parameters, trade detail, charts). Sidebar **Navigate → F&O snapshots report**.
 - **F&O Agent (OpenAI)**: **Current calendar month** session date (not after today). **Deterministic** underlying signal (envelope or EMA), then an **OpenAI** ReAct loop with **only** Zerodha-style read tools **`search_instruments`**, **`get_historical_data`**, plus app-only **`submit_mock_trade_choice`** (no `place_order` / GTT / etc.). **No live orders**—mock P/L is computed in app code. Set **`OPENAI_API_KEY`** and optional **`OPENAI_MODEL`** (default `gpt-5.4-mini`) in `.env` or Streamlit secrets. With **`KITE_MCP_ENABLED=1`** (or **`KITE_MCP_STREAMABLE_URL`** / **`KITE_MCP_COMMAND`**), those read tools hit the **Zerodha Kite MCP server**; otherwise **KiteConnect** runs the same parameters in-process. See `.env.example` for **`KITE_MCP_*`**. Set **`KITE_MCP_TOOL_OUTPUT_FILE`** (e.g. `./logs/kite_mcp_tools.jsonl`) to append each MCP tool response as one JSON line. **Logs**: loggers `trade_claw.fo_openai_agent` and `trade_claw.kite_mcp_client`; set **`FO_AGENT_LOG_LEVEL=DEBUG`** for more detail. Sidebar **Navigate → F&O Agent**.
+- **Mock AI engine (autonomous)**: **Celery Beat** (IST, weekdays) triggers **`scan_mock_market`**, which runs a **LangGraph** flow: Nifty spot **20-EMA ± bandwidth** breakout on the latest bar → long **CE** or **PE** only → top-five strikes → **OpenAI** structured pick → **mock** insert into SQLite (**`MOCK_TRADES_DB_PATH`**, WAL). **15:20 IST** square-off of any open row; before that, **target/stop** on option LTP each tick. **One open mock position** at a time. The worker needs **Kite** access: log in once via Streamlit so **`.kite_session.json`** exists on the same host, or set **`KITE_ACCESS_TOKEN`**. Sidebar **Navigate → Mock AI engine**: **Live** tab (telemetry + live LTP/charts) and **Analytics** tab (multi-month stats from `mock_trades`, CSV export, optional snapshot replay via **`MOCK_ENGINE_SNAPSHOT_BARS`**). See **`.env.example`** for **`MOCK_AGENT_*`**. Stack: Redis + `uv run celery -A trade_claw.celery_app worker --loglevel=info` + `uv run celery -A trade_claw.celery_app beat --loglevel=info`. **Flow & architecture:** [docs/MOCK_ENGINE.md](docs/MOCK_ENGINE.md).
 - **Stock page**: date range, interval, OHLC candlestick chart (Plotly), and summary metrics.
 
 ## Prerequisites
@@ -81,6 +82,11 @@ uv run streamlit run app.py
 | `trade_claw/trade_engine.py` | Shared trade row builder + split-by-day |
 | `trade_claw/institutional_floor.py` | SMA 50/200 buy-only sizing for ETFs |
 | `trade_claw/views/index_etfs.py` | Index ETF dashboard |
+| `trade_claw/mock_engine_run.py` | Celery tick: SL/target exits, 15:20 square-off, LangGraph entry |
+| `trade_claw/mock_trading_graph.py` | LangGraph: signal → candidates → LLM → mock DB |
+| `trade_claw/mock_trade_store.py` | SQLite `mock_trades` (WAL) |
+| `trade_claw/kite_headless.py` | Kite client for workers (env + `.kite_session.json`) |
+| `trade_claw/views/mock_engine.py` | Streamlit HUD for mock engine |
 
 ## Notes
 

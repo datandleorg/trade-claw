@@ -17,6 +17,9 @@ _data_dir = Path(__file__).resolve().parent.parent / "data"
 _default_db = _data_dir / "tasks.db"
 TASK_DB_PATH = os.environ.get("TASK_DB_PATH", str(_default_db))
 
+_default_mock_db = _data_dir / "mock_engine.db"
+MOCK_TRADES_DB_PATH = os.environ.get("MOCK_TRADES_DB_PATH", str(_default_mock_db))
+
 EVENT_CHANNEL_PREFIX = "trade_claw"
 PAUSE_KEY_PREFIX = f"{EVENT_CHANNEL_PREFIX}:task"
 
