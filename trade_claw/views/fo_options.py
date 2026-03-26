@@ -10,7 +10,6 @@ from trade_claw.constants import (
     DEFAULT_INTERVALS,
     DEFAULT_INTRADAY_INTERVAL,
     ENVELOPE_EMA_PERIOD,
-    ENVELOPE_PCT,
     FO_BROKERAGE_PER_LOT_RT_DEFAULT,
     FO_CLOSED_AT_REALISED,
     FO_DEFAULT_UNDERLYINGS,
@@ -35,6 +34,12 @@ from trade_claw.constants import (
 )
 from trade_claw.fo_options_persist import fingerprint_params, save_fo_options_snapshot
 from trade_claw.fo_runner import run_fo_underlying_one_day
+from trade_claw.mock_market_signal import (
+    fo_options_default_envelope_bandwidth_pct,
+    fo_options_default_option_stop_loss_pct_ui,
+    fo_options_default_option_target_pct_ui,
+    mock_agent_envelope_pct,
+)
 from trade_claw.pl_style import pl_markdown, pl_title_color, style_pl_dataframe
 from trade_claw.strategies import add_ma_ema_line_traces, add_ma_envelope_line_traces
 
@@ -447,22 +452,24 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
         key="fo_interval",
     )
     if strategy_is_envelope:
+        _env_bw_default = fo_options_default_envelope_bandwidth_pct()
         envelope_bw_pct = st.slider(
             "Envelope bandwidth (% each side of EMA)",
             min_value=float(FO_ENVELOPE_BANDWIDTH_MIN_PCT),
             max_value=float(FO_ENVELOPE_BANDWIDTH_MAX_PCT),
-            value=float(round(100 * ENVELOPE_PCT, 4)),
+            value=float(round(_env_bw_default, 4)),
             step=float(FO_ENVELOPE_BANDWIDTH_STEP),
             key="fo_envelope_bandwidth_pct",
             help=(
                 "Upper band = EMA × (1 + p), lower = EMA × (1 − p), with p = this % ÷ 100. "
-                f"Intraday home default is {100 * ENVELOPE_PCT:.2f}%."
+                f"Default follows **`MOCK_AGENT_ENVELOPE_PCT`** (else code `ENVELOPE_PCT`, "
+                f"currently {100 * mock_agent_envelope_pct():.4f}% each side)."
             ),
         )
         envelope_pct = envelope_bw_pct / 100.0
     else:
-        envelope_bw_pct = float(round(100 * ENVELOPE_PCT, 4))
-        envelope_pct = ENVELOPE_PCT
+        envelope_pct = mock_agent_envelope_pct()
+        envelope_bw_pct = float(round(100 * envelope_pct, 4))
         st.caption(
             f"EMA crossover uses **fast {MA_EMA_FAST}** / **slow {MA_EMA_SLOW}** (same as intraday home). "
             "First cross in the session sets the signal."
@@ -488,8 +495,8 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
             help="STT, stamp, exchange—your lump sum per lot for the full round trip.",
         )
 
-    _tg_default = float(min(200.0, max(0.5, round(100 * FO_OPTION_TARGET_PCT, 2))))
-    _sl_default = float(min(50.0, max(0.0, round(100 * FO_OPTION_STOP_LOSS_PCT, 2))))
+    _tg_default = fo_options_default_option_target_pct_ui()
+    _sl_default = fo_options_default_option_stop_loss_pct_ui()
     sl1, sl2 = st.columns(2)
     with sl1:
         option_target_pct_ui = st.slider(
@@ -501,8 +508,8 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
             key="fo_option_target_pct_ui",
             help=(
                 "Exit when option bar **high** ≥ entry × (1 + %/100). "
-                f"Default from env **`FO_OPTION_TARGET_PCT`** ({100 * FO_OPTION_TARGET_PCT:.1f}%). "
-                "Same-bar as stop: **target wins**."
+                "Default from **`MOCK_ENGINE_OPTION_TARGET_PCT`** if set, else **`FO_OPTION_TARGET_PCT`** "
+                f"({100 * FO_OPTION_TARGET_PCT:.1f}%). Same-bar as stop: **target wins**."
             ),
         )
     with sl2:
@@ -515,7 +522,8 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
             key="fo_option_stop_loss_pct_ui",
             help=(
                 "**0** = no stop (only target or EOD). Otherwise exit when option bar **low** ≤ entry × (1 − %/100). "
-                "Same-bar as target: **target wins** (same rule as cash BUY in this app)."
+                "Default from **`MOCK_ENGINE_OPTION_STOP_PCT`** / **`MOCK_ENGINE_STOP_LOSS_CLAMP_PCT`** if set, "
+                "else **`FO_OPTION_STOP_LOSS_PCT`**. Same-bar as target: **target wins** (same as cash BUY)."
             ),
         )
     option_target_pct = option_target_pct_ui / 100.0

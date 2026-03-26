@@ -12,7 +12,6 @@ from trade_claw.constants import (
     DEFAULT_INTERVALS,
     DEFAULT_INTRADAY_INTERVAL,
     ENVELOPE_EMA_PERIOD,
-    ENVELOPE_PCT,
     FO_BROKERAGE_PER_LOT_RT_DEFAULT,
     FO_CLOSED_AT_REALISED,
     FO_ENVELOPE_BANDWIDTH_MAX_PCT,
@@ -32,6 +31,10 @@ from trade_claw.constants import (
     NSE_EXCHANGE,
 )
 from trade_claw.fo_openai_agent import configure_fo_agent_logging, get_openai_api_key, run_fo_agent_pipeline
+from trade_claw.mock_market_signal import (
+    fo_options_default_envelope_bandwidth_pct,
+    mock_agent_envelope_pct,
+)
 from trade_claw.kite_session import get_kite_credentials
 from trade_claw.pl_style import pl_markdown, pl_title_color
 from trade_claw.strategies import add_ma_ema_line_traces, add_ma_envelope_line_traces
@@ -184,18 +187,23 @@ def render_fo_agent_options(kite):
     )
 
     if strategy_is_envelope:
+        _foa_env_bw = fo_options_default_envelope_bandwidth_pct()
         envelope_bw_pct = st.slider(
             "Envelope bandwidth (% each side of EMA)",
             min_value=float(FO_ENVELOPE_BANDWIDTH_MIN_PCT),
             max_value=float(FO_ENVELOPE_BANDWIDTH_MAX_PCT),
-            value=float(round(100 * ENVELOPE_PCT, 4)),
+            value=float(round(_foa_env_bw, 4)),
             step=float(FO_ENVELOPE_BANDWIDTH_STEP),
             key="foa_envelope_bandwidth_pct",
+            help=(
+                "Default follows **`MOCK_AGENT_ENVELOPE_PCT`** (else `ENVELOPE_PCT` in code). "
+                f"Resolved: **{100 * mock_agent_envelope_pct():.4f}%** each side."
+            ),
         )
         envelope_pct = envelope_bw_pct / 100.0
     else:
-        envelope_bw_pct = float(round(100 * ENVELOPE_PCT, 4))
-        envelope_pct = ENVELOPE_PCT
+        envelope_pct = mock_agent_envelope_pct()
+        envelope_bw_pct = float(round(100 * envelope_pct, 4))
         st.caption(
             f"EMA crossover uses **fast {MA_EMA_FAST}** / **slow {MA_EMA_SLOW}**."
         )

@@ -151,14 +151,14 @@ flowchart LR
 
 ### Node: `llm`
 
-1. **Structured output** (`LLMPick`): `tradingsymbol`, `stop_loss`, `target`, `rationale` (premium prices, not index points).
+1. **Structured output** (`LLMPick`): `tradingsymbol`, `rationale` only (stop/target are **not** from the model).
 2. Validates `tradingsymbol` is **exactly** one of the five candidates.
 
 ### Node: `execute`
 
 1. Re-reads LTP for the chosen symbol.
 2. **Entry (mock BUY)**: `entry_price = max(0.01, ltp - slippage)` with slippage in the configured rupee range.
-3. Clamps **target** above entry and **stop** below entry if the model returns inconsistent premium levels (stop floor: **`MOCK_ENGINE_STOP_LOSS_CLAMP_PCT`**, default 30% below entry).
+3. Sets **stop** and **target** from env as fractions of synthetic **entry**: `MOCK_ENGINE_OPTION_STOP_PCT` (default 30 → 30% below entry) and `MOCK_ENGINE_OPTION_TARGET_PCT` (default 15 → 15% above). If `MOCK_ENGINE_OPTION_STOP_PCT` is unset, **`MOCK_ENGINE_STOP_LOSS_CLAMP_PCT`** is used as the stop percent (legacy alias).
 4. Sizes with `fo_lot_qty_for_allocation` and `ALLOCATED_AMOUNT` → whole lots → `quantity` = units for PnL.
 5. **`insert_open_trade`** (includes **`index_underlying`**, normalized uppercase) → new `OPEN` row (`mock_trade_store`). At most **one** `OPEN` row per `index_underlying` (enforced by pre-insert check, **`IntegrityError`** handling, and partial unique index **`idx_mock_trades_one_open_per_index`** where possible).
 
@@ -189,7 +189,7 @@ Core columns match the product blueprint; two extra columns support realistic Pn
 | `instrument` | NFO `tradingsymbol` |
 | `direction` | `BULLISH` / `BEARISH` |
 | `entry_price` | Simulated **buy** fill (LTP minus slippage) |
-| `stop_loss` / `target` | Premium levels from LLM (possibly clamped) |
+| `stop_loss` / `target` | Premium levels from env percents vs `entry_price` (not from the LLM) |
 | `llm_rationale` | Model explanation |
 | `status` | `OPEN` / `CLOSED` |
 | `exit_price` / `realized_pnl` | Set on close |
@@ -247,7 +247,9 @@ Trade and scan events use logger **`trade_claw.mock_market_scan`** with a consis
 | `MOCK_AGENT_SLIPPAGE_LO` / `MOCK_AGENT_SLIPPAGE_HI` | Slippage range (rupees) |
 | `MOCK_ENGINE_SNAPSHOT_BARS` | Max 1m bars stored **per leg** for option **and** index spot snapshots at entry/exit (`0` = off, default `60`) |
 | `MOCK_ENGINE_UNDERLYINGS` | Comma-separated index keys; each minute tick runs the graph once per key with no OPEN row for that index. |
-| `MOCK_ENGINE_STOP_LOSS_CLAMP_PCT` | If LLM `stop_loss ≥ entry`, replace with `entry × (1 − pct/100)` (default **30** → 30% below entry; was hard-coded 15% before). Allowed range clamped 5–90. |
+| `MOCK_ENGINE_OPTION_STOP_PCT` | Stop as % **below** entry: `entry × (1 − pct/100)` (default **30**). Range clamped 5–90. |
+| `MOCK_ENGINE_OPTION_TARGET_PCT` | Target as % **above** entry: `entry × (1 + pct/100)` (default **15**). |
+| `MOCK_ENGINE_STOP_LOSS_CLAMP_PCT` | Legacy: used **only** when `MOCK_ENGINE_OPTION_STOP_PCT` is unset; same formula as stop % above. |
 | `MOCK_ENGINE_LOG_COLOR` | `1` (default): ANSI colors for `[mock_market_scan]` logs in a TTY; `0` / `false` to disable (also respects `NO_COLOR`). |
 | `REDIS_URL` / `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Celery |
 

@@ -25,7 +25,8 @@ from trade_claw.mock_market_signal import (
     load_index_session_minute_df,
     mock_agent_envelope_pct,
     mock_agent_slippage_points,
-    mock_engine_stop_loss_floor_multiplier,
+    mock_engine_option_stop_multiplier,
+    mock_engine_option_target_multiplier,
     mock_engine_underlyings,
     top_five_option_instruments,
 )
@@ -40,9 +41,7 @@ from trade_claw.mock_trade_snapshot import (
 
 class LLMPick(BaseModel):
     tradingsymbol: str = Field(description="Must be exactly one tradingsymbol from the candidate list")
-    stop_loss: float = Field(description="Option premium stop loss (rupees per unit)")
-    target: float = Field(description="Option premium profit target (rupees per unit)")
-    rationale: str = Field(description="Short rationale for strike and risk levels")
+    rationale: str = Field(description="Short rationale for strike choice (stop/target come from env, not the model)")
 
 
 class TradingState(TypedDict, total=False):
@@ -194,7 +193,7 @@ def build_mock_trading_graph(
                 "You choose one **NSE index option** contract for a **long premium only** mock trade "
                 "(calls for bullish, puts for bearish — wrong type already removed in code). "
                 "Pick the best strike/expiry among the candidates using DTE, moneyness vs spot, and liquidity (LTP). "
-                "Return realistic stop_loss and target as **option premium** prices (rupees per unit), not index points."
+                "Do not invent stop or target prices; the system sets them from configuration after entry."
             )
         )
         human = HumanMessage(
@@ -219,16 +218,12 @@ def build_mock_trading_graph(
             return {"error": f"LLM picked unknown symbol {pick.tradingsymbol!r}"}
         scan_info(
             "llm_pick",
-            "LLM_PICK underlying=%s symbol=%s stop=%.2f target=%.2f",
+            "LLM_PICK underlying=%s symbol=%s",
             idx,
             pick.tradingsymbol,
-            float(pick.stop_loss),
-            float(pick.target),
         )
         return {
             "llm_tradingsymbol": pick.tradingsymbol,
-            "stop_loss": float(pick.stop_loss),
-            "target": float(pick.target),
             "llm_rationale": pick.rationale.strip(),
         }
 
@@ -256,12 +251,8 @@ def build_mock_trading_graph(
             return {"error": "No LTP for execution"}
         slip = mock_agent_slippage_points()
         entry = max(0.01, ltp - slip)
-        stop_loss = float(state.get("stop_loss") or 0)
-        target = float(state.get("target") or 0)
-        if target <= entry:
-            target = round(entry * 1.15, 2)
-        if stop_loss >= entry:
-            stop_loss = round(entry * mock_engine_stop_loss_floor_multiplier(), 2)
+        stop_loss = round(entry * mock_engine_option_stop_multiplier(), 2)
+        target = round(entry * mock_engine_option_target_multiplier(), 2)
         n_lots, qty_units, _ = fo_lot_qty_for_allocation(entry, lot_size, ALLOCATED_AMOUNT)
         if n_lots < 1:
             scan_warning(
@@ -314,7 +305,7 @@ def build_mock_trading_graph(
             target,
             qty_units,
         )
-        return {"trade_id": tid}
+        return {"trade_id": tid, "stop_loss": stop_loss, "target": target}
 
     def route_after_signal(state: TradingState) -> str:
         if state.get("error"):
