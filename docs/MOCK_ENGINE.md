@@ -2,7 +2,7 @@
 
 This document describes how the **NSE index options mock engine** works in trade-claw: what runs when, which modules participate, and how data moves from Kite → Celery → LangGraph → SQLite → Streamlit.
 
-It reflects the implementation in `trade_claw/mock_engine_run.py`, `trade_claw/mock_trading_graph.py`, `trade_claw/mock_market_signal.py`, `trade_claw/mock_trade_store.py`, and `trade_claw/kite_headless.py`.
+It reflects the implementation in `trade_claw/mock_engine_run.py`, `trade_claw/mock_trading_graph.py`, `trade_claw/mock_market_signal.py`, `trade_claw/mock_trade_store.py`, and `trade_claw/kite_headless.py`. **Envelope bandwidth and option target/stop** resolve from environment variables in **`trade_claw/env_trading_params.py`** (same module as the F&O Options / F&O Agent pages); see `.env.example` — **Trading defaults**.
 
 ---
 
@@ -136,7 +136,7 @@ flowchart LR
 
 1. If **`signal_underlying`** is set in state (Celery passes one index per invoke), only that key is scanned (must appear in **`MOCK_ENGINE_UNDERLYINGS`**). Otherwise the node scans **all** keys in order (legacy single-invoke behaviour).
 2. For each key in that list, loads **full session** spot **1-minute** candles for `session_d` from **09:15 to 15:30** (`load_index_session_minute_df` → `fetch_underlying_intraday`).
-3. Runs `envelope_breakout_on_last_bar` with **20-period EMA** and bandwidth **`MOCK_AGENT_ENVELOPE_PCT`** (decimal per side; default **`constants.ENVELOPE_PCT`** = **0.0030** = **0.30%** each side of EMA20 — same geometry as `strategies._envelope_series`). Set env to widen (e.g. `0.01` for 1% per side).
+3. Runs `envelope_breakout_on_last_bar` with **20-period EMA** and bandwidth from **`env_trading_params.fno_envelope_decimal_per_side()`** (env `MOCK_AGENT_ENVELOPE_PCT`; default **0.25** = **25%** each side when unset). Tighter bands: e.g. `MOCK_AGENT_ENVELOPE_PCT=0.003`. Geometry matches `strategies._envelope_series` when the same decimal is passed as `pct`.
 4. **Trigger** (on the **latest** completed bar only): **first** key in the **scan list** that shows a fresh cross wins; state includes **`underlying`** (the index key).
    - Close crosses **above** upper band → **BULLISH**, leg **CE**.
    - Close crosses **below** lower band → **BEARISH**, leg **PE**.
@@ -158,7 +158,7 @@ flowchart LR
 
 1. Re-reads LTP for the chosen symbol.
 2. **Entry (mock BUY)**: `entry_price = max(0.01, ltp - slippage)` with slippage in the configured rupee range.
-3. Sets **stop** and **target** from env as fractions of synthetic **entry**: `MOCK_ENGINE_OPTION_STOP_PCT` (default 30 → 30% below entry) and `MOCK_ENGINE_OPTION_TARGET_PCT` (default 15 → 15% above). If `MOCK_ENGINE_OPTION_STOP_PCT` is unset, **`MOCK_ENGINE_STOP_LOSS_CLAMP_PCT`** is used as the stop percent (legacy alias).
+3. Sets **stop** and **target** from env as fractions of synthetic **entry**: `MOCK_ENGINE_OPTION_STOP_PCT` (default **25** → 25% below entry) and `MOCK_ENGINE_OPTION_TARGET_PCT` (default **25** → 25% above). If `MOCK_ENGINE_OPTION_STOP_PCT` is unset, **`MOCK_ENGINE_STOP_LOSS_CLAMP_PCT`** is used as the stop percent (legacy alias; default **25**).
 4. Sizes with `fo_lot_qty_for_allocation` and `ALLOCATED_AMOUNT` → whole lots → `quantity` = units for PnL.
 5. **`insert_open_trade`** (includes **`index_underlying`**, normalized uppercase) → new `OPEN` row (`mock_trade_store`). At most **one** `OPEN` row per `index_underlying` (enforced by pre-insert check, **`IntegrityError`** handling, and partial unique index **`idx_mock_trades_one_open_per_index`** where possible).
 
@@ -233,6 +233,12 @@ Trade and scan events use logger **`trade_claw.mock_market_scan`** with a consis
 4. **Monitoring**: Streamlit → **Mock AI engine** — **Live** tab: auto-refreshing quotes/charts + telemetry; **Analytics** tab: multi-month stats from `mock_trades`, CSV export, snapshot replay (if enabled).
 5. **End of day**: After **15:20 IST**, open rows are closed; Beat may still enqueue tasks until hour 15 ends, but logic stays idempotent.
 
+### Docker Compose
+
+Telemetry (`last_scan` / `last_graph`) and mock trades live in the same SQLite file as **`MOCK_TRADES_DB_PATH`** (default **`data/mock_engine.db`**). The **Celery worker** writes that file; **Streamlit** reads it. If both run in separate containers **without** a shared **`/app/data`** volume, the UI will show an empty **`last_scan`** (`{}`) even when the worker is healthy — each container has its own copy of `data/`. The repo **`docker-compose.yml`** mounts a named volume on **`streamlit`** and **`celery-worker`** so they share **`/app/data`**.
+
+**Kite login in Docker:** The worker calls Kite with **`get_kite_headless()`** — it does **not** use the Streamlit session in memory. It needs **`KITE_ACCESS_TOKEN`** in `.env`, or a **session JSON file** whose path matches on both containers. Compose sets **`KITE_SESSION_FILE=/app/data/.kite_session.json`** so after you log in via Streamlit, the token is saved next to the SQLite DB on the **shared** volume and the worker can read it. If you still see **`Incorrect api_key` or `access_token`**, regenerate the token (log in again), confirm **`KITE_API_KEY`** matches the app you logged into, or set **`KITE_ACCESS_TOKEN`** explicitly for the worker.
+
 ---
 
 ## 9. Key environment variables
@@ -243,17 +249,17 @@ Trade and scan events use logger **`trade_claw.mock_market_scan`** with a consis
 | `KITE_ACCESS_TOKEN` | Optional override if not using `.kite_session.json` |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | LLM node |
 | `MOCK_TRADES_DB_PATH` | SQLite file path (default under `data/`) |
-| `MOCK_AGENT_ENVELOPE_PCT` | EMA envelope bandwidth **per side** as decimal (default **`ENVELOPE_PCT`** in code = **0.0030** = 0.30% each side of EMA20) |
+| `MOCK_AGENT_ENVELOPE_PCT` | EMA envelope bandwidth **per side** as decimal (default **0.25** = **25%** each side of EMA20); parsed in `env_trading_params.fno_envelope_decimal_per_side` |
 | `MOCK_AGENT_SLIPPAGE_LO` / `MOCK_AGENT_SLIPPAGE_HI` | Slippage range (rupees) |
 | `MOCK_ENGINE_SNAPSHOT_BARS` | Max 1m bars stored **per leg** for option **and** index spot snapshots at entry/exit (`0` = off, default `60`) |
 | `MOCK_ENGINE_UNDERLYINGS` | Comma-separated index keys; each minute tick runs the graph once per key with no OPEN row for that index. |
-| `MOCK_ENGINE_OPTION_STOP_PCT` | Stop as % **below** entry: `entry × (1 − pct/100)` (default **30**). Range clamped 5–90. |
-| `MOCK_ENGINE_OPTION_TARGET_PCT` | Target as % **above** entry: `entry × (1 + pct/100)` (default **15**). |
-| `MOCK_ENGINE_STOP_LOSS_CLAMP_PCT` | Legacy: used **only** when `MOCK_ENGINE_OPTION_STOP_PCT` is unset; same formula as stop % above. |
+| `MOCK_ENGINE_OPTION_STOP_PCT` | Stop as whole-number % **below** entry when set (clamped 5–90 before use). If unset, **`FO_OPTION_STOP_LOSS_PCT`** (decimal, default **0.10**) applies — see `env_trading_params.option_stop_premium_fraction`. |
+| `MOCK_ENGINE_OPTION_TARGET_PCT` | Target as whole-number % **above** entry when set. If unset, **`FO_OPTION_TARGET_PCT`** (decimal, default **0.25**) applies. |
+| `MOCK_ENGINE_STOP_LOSS_CLAMP_PCT` | Legacy: used **only** when `MOCK_ENGINE_OPTION_STOP_PCT` is unset; same whole-number % semantics as stop above (takes precedence over `FO_OPTION_*` when set). |
 | `MOCK_ENGINE_LOG_COLOR` | `1` (default): ANSI colors for `[mock_market_scan]` logs in a TTY; `0` / `false` to disable (also respects `NO_COLOR`). |
 | `REDIS_URL` / `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Celery |
 
-See `.env.example` for commented templates.
+See `.env.example` (**Trading defaults**). Implementation: `trade_claw/env_trading_params.py`.
 
 ---
 
@@ -266,7 +272,8 @@ See `.env.example` for commented templates.
 | `trade_claw/mock_engine_run.py` | Per-tick orchestration, exits, graph invoke |
 | `trade_claw/mock_engine_log.py` | Colored `[mock_market_scan]` log helpers (`trade_claw.mock_market_scan` logger) |
 | `trade_claw/mock_trading_graph.py` | LangGraph definition and `invoke_mock_graph` |
-| `trade_claw/mock_market_signal.py` | IST helpers, envelope breakout, top-five strikes |
+| `trade_claw/env_trading_params.py` | `.env` → envelope bandwidth, option target/stop (shared with F&O pages) |
+| `trade_claw/mock_market_signal.py` | IST helpers, envelope breakout, top-five strikes; re-exports env trading helpers |
 | `trade_claw/mock_trade_store.py` | CRUD + WAL connection |
 | `trade_claw/mock_trade_analytics.py` | Date-range queries + pandas summaries for Analytics tab |
 | `trade_claw/mock_trade_snapshot.py` | Optional minute-bar JSON at entry/exit |
@@ -284,4 +291,4 @@ See `.env.example` for commented templates.
 - **Checkpoint thread IDs**: New UUID suffix per scan limits cross-tick LangGraph “memory”; ledger truth is **`mock_trades`**, not the checkpoint.
 - **Beat granularity**: Crontab is coarser than “09:15–15:30 only”; correctness relies on **Python time checks** inside `run_scan`.
 
-For behaviour changes, start with `mock_engine_run.run_scan` ordering, then `mock_market_signal` gates, then graph nodes in `mock_trading_graph.py`.
+For behaviour changes, start with `env_trading_params` / `.env`, then `mock_engine_run.run_scan` ordering, then `mock_market_signal` gates, then graph nodes in `mock_trading_graph.py`.

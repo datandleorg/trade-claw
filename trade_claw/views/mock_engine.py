@@ -579,7 +579,11 @@ def render_mock_engine(kite):
         with w3:
             st.metric("Scan skip / state", last_scan.get("skipped") or "ok")
         with w4:
-            st.metric("Envelope ±", f"{100 * env_pct:.3f}%", help="MOCK_AGENT_ENVELOPE_PCT each side of EMA20")
+            st.metric(
+                "Envelope ±",
+                f"{100 * env_pct:.3f}%",
+                help="From MOCK_AGENT_ENVELOPE_PCT (trade_claw.env_trading_params.fno_envelope_decimal_per_side)",
+            )
 
         if open_rows:
             st.subheader("Current mock positions")

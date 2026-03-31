@@ -32,7 +32,8 @@ def get_kite_headless() -> KiteConnect:
 
     if not token:
         raise ValueError(
-            "No Kite access token: log in via Streamlit once (writes .kite_session.json) or set KITE_ACCESS_TOKEN"
+            "No Kite access token: log in via Streamlit once (writes session file), set KITE_ACCESS_TOKEN, "
+            f"or ensure KITE_SESSION_FILE points to a shared path the worker can read (current: {path})"
         )
 
     kite = KiteConnect(api_key=api_key)

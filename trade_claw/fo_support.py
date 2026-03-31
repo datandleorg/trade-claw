@@ -291,10 +291,42 @@ def align_option_entry_bar(
 _INDEX_NSE_SPOT_CANDIDATES: dict[str, tuple[str, ...]] = {
     "NIFTY": ("NIFTY 50",),
     "BANKNIFTY": ("NIFTY BANK",),
-    "FINNIFTY": ("NIFTY FIN SERVICE", "NIFTY FIN SERV"),
+    "FINNIFTY": (
+        "NIFTY FIN SERVICE",
+        "NIFTY FIN SERV",
+        "NIFTY FINSERVICE",
+        "FINNIFTY",
+    ),
     "MIDCPNIFTY": ("NIFTY MIDCAP SELECT", "NIFTY MID SELECT"),
     "NIFTYNXT50": ("NIFTY NEXT 50",),
 }
+
+
+def _nse_index_tradingsymbol_fallback(underlying: str, nse_instruments: list) -> str | None:
+    """
+    If exact tradingsymbol candidates miss, match Kite NSE index rows by segment/name.
+    FINNIFTY naming varies across Kite instrument dumps.
+    """
+    u = underlying.upper().strip()
+    if u == "FINNIFTY":
+        for i in nse_instruments:
+            if i.get("exchange") != "NSE":
+                continue
+            seg = str(i.get("segment") or "").upper()
+            if "INDICES" not in seg:
+                continue
+            nm = str(i.get("name") or "").upper()
+            ts = str(i.get("tradingsymbol") or "").strip()
+            if not ts:
+                continue
+            if ("FIN" in nm or "FIN" in ts.upper()) and (
+                "SERV" in nm
+                or "SERV" in ts.upper()
+                or "FINANCIAL" in nm
+                or "FINSERVICE" in nm.replace(" ", "")
+            ):
+                return ts
+    return None
 
 
 def underlying_index_tradingsymbol(underlying: str) -> str | None:
@@ -314,7 +346,11 @@ def _nse_spot_candidates_for_underlying(underlying: str) -> list[str]:
 def fetch_underlying_intraday(kite, underlying: str, nse_instruments, from_str: str, to_str: str, interval: str):
     """Load intraday OHLC for index (FO_INDEX_* keys) or equity symbol."""
     last_err: str | None = None
-    for sym in _nse_spot_candidates_for_underlying(underlying):
+    cands = list(_nse_spot_candidates_for_underlying(underlying))
+    fb = _nse_index_tradingsymbol_fallback(underlying, nse_instruments)
+    if fb and fb not in cands:
+        cands.append(fb)
+    for sym in cands:
         token = get_instrument_token(sym, nse_instruments)
         if token is None:
             last_err = f"No NSE instrument for {sym}"

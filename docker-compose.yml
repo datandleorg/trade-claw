@@ -1,3 +1,7 @@
+# Share /app/data so Celery worker writes mock_engine.db + telemetry and Streamlit reads the same files.
+volumes:
+  trade_claw_app_data:
+
 services:
   redis:
     image: redis:7-alpine
@@ -16,12 +20,16 @@ services:
     command: uv run streamlit run app.py --server.address 0.0.0.0 --server.port 8501
     ports:
       - "8501:8501"
+    volumes:
+      - trade_claw_app_data:/app/data
     env_file:
       - .env
     environment:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+      # Same file as Celery worker — log in via Streamlit once; both containers read this path.
+      KITE_SESSION_FILE: /app/data/.kite_session.json
     depends_on:
       redis:
         condition: service_healthy
@@ -31,12 +39,15 @@ services:
       context: .
       dockerfile: Dockerfile
     command: uv run celery -A trade_claw.celery_app worker --loglevel=info
+    volumes:
+      - trade_claw_app_data:/app/data
     env_file:
       - .env
     environment:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+      KITE_SESSION_FILE: /app/data/.kite_session.json
     depends_on:
       redis:
         condition: service_healthy
@@ -56,11 +67,15 @@ services:
       redis:
         condition: service_healthy
 
+  # Tunnel to Streamlit via host port — avoids Docker DNS "lookup streamlit ... server misbehaving"
+  # when the embedded resolver flakes. Requires streamlit publishing 8501 (see streamlit.ports).
   ngrok:
     image: ngrok/ngrok:latest
-    command: http --log=stdout --url=joesph-nonalliterative-nelida.ngrok-free.dev streamlit:8501
+    command: http --log=stdout --url=wintery-wendell-undespondingly.ngrok-free.dev host.docker.internal:8501
     environment:
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       streamlit:
         condition: service_started

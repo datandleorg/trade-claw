@@ -3,12 +3,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from trade_claw.constants import (
-    ALLOCATED_AMOUNT,
-    ENVELOPE_EMA_PERIOD,
-    ENVELOPE_PCT,
-    REPORTS_MIN_BARS_PER_DAY,
-)
+from trade_claw.constants import ALLOCATED_AMOUNT, ENVELOPE_EMA_PERIOD, REPORTS_MIN_BARS_PER_DAY
+from trade_claw.env_trading_params import intraday_envelope_decimal
 from trade_claw.strategies import (
     filter_analyses_by_strategy_choice,
     get_applicable_strategies,
@@ -49,7 +45,7 @@ def build_trade_rows_from_analyses(df: pd.DataFrame, analyses: list) -> list[dic
                 sig["signal"],
                 qty,
                 sig.get("ema_period", ENVELOPE_EMA_PERIOD),
-                sig.get("pct", ENVELOPE_PCT),
+                sig.get("pct", intraday_envelope_decimal()),
             )
         elif sig.get("signal") and sig.get("target") is not None and sig.get("stop") is not None:
             if entry_bar_idx is not None and 0 <= entry_bar_idx < len(df):

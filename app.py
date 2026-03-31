@@ -3,6 +3,10 @@ Streamlit app: Kite Connect – Nifty 50 dashboard and historical prices (NSE).
 Run: uv run streamlit run app.py
 """
 from dotenv import load_dotenv
+
+# Load `.env` before importing `trade_claw` so `constants` and env-based defaults match the file.
+load_dotenv()
+
 import streamlit as st
 from kiteconnect import KiteConnect
 
@@ -22,8 +26,6 @@ from trade_claw.views.index_etfs import render_index_etfs
 from trade_claw.views.mock_engine import render_mock_engine
 from trade_claw.views.reports import render_reports
 from trade_claw.views.stock_detail import render_stock_detail
-
-load_dotenv()
 
 
 def main():

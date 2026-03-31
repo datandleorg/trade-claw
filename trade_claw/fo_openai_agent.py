@@ -15,11 +15,10 @@ from openai import OpenAI
 
 from trade_claw.constants import (
     ENVELOPE_EMA_PERIOD,
-    FO_OPTION_STOP_LOSS_PCT,
-    FO_OPTION_TARGET_PCT,
     MA_EMA_FAST,
     MA_EMA_SLOW,
 )
+from trade_claw.env_trading_params import option_stop_premium_fraction, option_target_premium_fraction
 from trade_claw.fo_support import (
     align_option_entry_bar,
     fetch_underlying_intraday,
@@ -927,10 +926,12 @@ def _execute_mock_trade(
     if entry_premium <= 0:
         return {"error": "Non-positive entry premium"}
 
-    target_prem = entry_premium * (1.0 + FO_OPTION_TARGET_PCT)
+    _tgt = option_target_premium_fraction()
+    _stp = option_stop_premium_fraction()
+    target_prem = entry_premium * (1.0 + _tgt)
     stop_prem: float | None = None
-    if FO_OPTION_STOP_LOSS_PCT > 0:
-        sp = entry_premium * (1.0 - FO_OPTION_STOP_LOSS_PCT)
+    if _stp > 0:
+        sp = entry_premium * (1.0 - _stp)
         stop_prem = sp if sp > 0 else None
     ls = max(1, int(opt_inst.get("lot_size") or 1))
     n_lots = 1

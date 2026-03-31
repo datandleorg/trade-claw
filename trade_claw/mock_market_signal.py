@@ -8,12 +8,17 @@ import random
 from datetime import date, datetime, time as dtime
 from zoneinfo import ZoneInfo
 
-from trade_claw.constants import (
-    ENVELOPE_EMA_PERIOD,
-    ENVELOPE_PCT,
-    FO_INDEX_UNDERLYING_KEYS,
-    FO_OPTION_STOP_LOSS_PCT,
-    FO_OPTION_TARGET_PCT,
+from trade_claw.constants import ENVELOPE_EMA_PERIOD, FO_INDEX_UNDERLYING_KEYS
+from trade_claw.env_trading_params import (
+    fo_options_default_envelope_bandwidth_pct,
+    fo_options_default_option_stop_loss_pct_ui,
+    fo_options_default_option_target_pct_ui,
+    fno_envelope_decimal_per_side,
+    mock_engine_option_stop_multiplier,
+    mock_engine_option_target_multiplier,
+    mock_engine_stop_loss_floor_multiplier,
+    option_stop_premium_fraction,
+    option_target_premium_fraction,
 )
 from trade_claw.fo_support import fetch_underlying_intraday, underlying_index_tradingsymbol
 from trade_claw.strategies import _envelope_series
@@ -23,48 +28,21 @@ logger = logging.getLogger(__name__)
 
 
 def mock_agent_envelope_pct() -> float:
-    """Bandwidth each side of EMA as decimal (e.g. ``0.003`` = 0.3% above/below EMA)."""
-    raw = (os.environ.get("MOCK_AGENT_ENVELOPE_PCT") or "").strip()
-    if raw:
-        return float(raw)
-    return float(ENVELOPE_PCT)
-
-
-def fo_options_default_envelope_bandwidth_pct() -> float:
-    """F&O envelope slider default (% each side of EMA); same source as :func:`mock_agent_envelope_pct`."""
-    return float(round(100.0 * mock_agent_envelope_pct(), 6))
-
-
-def fo_options_default_option_target_pct_ui() -> float:
     """
-    F&O "target above entry" slider default (%).
-    Uses ``MOCK_ENGINE_OPTION_TARGET_PCT`` when set; else ``100 × FO_OPTION_TARGET_PCT``.
+    Bandwidth each side of EMA as decimal (e.g. ``0.25`` = 25% above/below EMA; ``0.003`` = 0.3%).
+    Env ``MOCK_AGENT_ENVELOPE_PCT`` overrides; else product default for mock engine / agent envelope.
     """
-    raw = (os.environ.get("MOCK_ENGINE_OPTION_TARGET_PCT") or "").strip()
-    if raw:
-        try:
-            v = float(raw)
-            return float(min(200.0, max(0.5, v)))
-        except ValueError:
-            pass
-    return float(min(200.0, max(0.5, round(100 * FO_OPTION_TARGET_PCT, 2))))
+    return fno_envelope_decimal_per_side()
 
 
-def fo_options_default_option_stop_loss_pct_ui() -> float:
-    """
-    F&O "stop below entry" slider default (%).
-    Uses ``MOCK_ENGINE_OPTION_STOP_PCT``, else ``MOCK_ENGINE_STOP_LOSS_CLAMP_PCT``, when set;
-    else ``100 × FO_OPTION_STOP_LOSS_PCT``.
-    """
-    raw_opt = (os.environ.get("MOCK_ENGINE_OPTION_STOP_PCT") or "").strip()
-    raw = raw_opt if raw_opt else (os.environ.get("MOCK_ENGINE_STOP_LOSS_CLAMP_PCT") or "").strip()
-    if raw:
-        try:
-            v = float(raw)
-            return float(min(50.0, max(0.0, v)))
-        except ValueError:
-            pass
-    return float(min(50.0, max(0.0, round(100 * FO_OPTION_STOP_LOSS_PCT, 2))))
+def fo_option_target_pct_runtime() -> float:
+    """Target as fraction of premium (see :func:`trade_claw.env_trading_params.option_target_premium_fraction`)."""
+    return option_target_premium_fraction()
+
+
+def fo_option_stop_loss_pct_runtime() -> float:
+    """Stop as fraction below entry (see :func:`trade_claw.env_trading_params.option_stop_premium_fraction`)."""
+    return option_stop_premium_fraction()
 
 
 def mock_agent_slippage_points() -> float:
@@ -126,41 +104,6 @@ def mock_engine_underlyings() -> list[str]:
         elif p:
             logger.warning("MOCK_ENGINE_UNDERLYINGS: unknown key %r ignored", p)
     return out if out else list(FO_INDEX_UNDERLYING_KEYS)
-
-
-def mock_engine_option_stop_multiplier() -> float:
-    """
-    Long premium: stored stop = ``entry * multiplier`` (percent **below** entry).
-    ``MOCK_ENGINE_OPTION_STOP_PCT`` if set; else ``MOCK_ENGINE_STOP_LOSS_CLAMP_PCT`` (legacy name);
-    default **30** → multiplier **0.70**.
-    """
-    raw_opt = (os.environ.get("MOCK_ENGINE_OPTION_STOP_PCT") or "").strip()
-    raw = raw_opt if raw_opt else (os.environ.get("MOCK_ENGINE_STOP_LOSS_CLAMP_PCT") or "30").strip()
-    try:
-        pct = float(raw)
-    except ValueError:
-        pct = 30.0
-    pct = max(5.0, min(90.0, pct))
-    return max(0.05, 1.0 - pct / 100.0)
-
-
-def mock_engine_option_target_multiplier() -> float:
-    """
-    Long premium: stored target = ``entry * multiplier`` (percent **above** entry).
-    ``MOCK_ENGINE_OPTION_TARGET_PCT`` (default **15** → **1.15**).
-    """
-    raw = (os.environ.get("MOCK_ENGINE_OPTION_TARGET_PCT") or "15").strip()
-    try:
-        pct = float(raw)
-    except ValueError:
-        pct = 15.0
-    pct = max(0.1, min(500.0, pct))
-    return 1.0 + pct / 100.0
-
-
-def mock_engine_stop_loss_floor_multiplier() -> float:
-    """Alias for :func:`mock_engine_option_stop_multiplier` (legacy name)."""
-    return mock_engine_option_stop_multiplier()
 
 
 def nse_index_ltp_symbol(underlying_key: str) -> str | None:

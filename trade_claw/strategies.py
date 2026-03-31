@@ -3,11 +3,11 @@ import plotly.graph_objects as go
 
 from trade_claw.constants import (
     ENVELOPE_EMA_PERIOD,
-    ENVELOPE_PCT,
     INTERVAL_MINUTES,
     MA_EMA_FAST,
     MA_EMA_SLOW,
 )
+from trade_claw.env_trading_params import intraday_envelope_decimal
 
 
 def _orb_analysis(df, opening_range_minutes=15, interval_minutes=5):
@@ -214,7 +214,9 @@ def add_ma_ema_line_traces(fig, df, fast_period=MA_EMA_FAST, slow_period=MA_EMA_
     )
 
 
-def _envelope_series(df, ema_period=ENVELOPE_EMA_PERIOD, pct=ENVELOPE_PCT):
+def _envelope_series(df, ema_period=ENVELOPE_EMA_PERIOD, pct=None):
+    if pct is None:
+        pct = intraday_envelope_decimal()
     close = df["close"]
     center = close.ewm(span=ema_period, adjust=False).mean()
     upper = center * (1 + pct)
@@ -222,7 +224,9 @@ def _envelope_series(df, ema_period=ENVELOPE_EMA_PERIOD, pct=ENVELOPE_PCT):
     return center, upper, lower
 
 
-def _ma_envelope_analysis(df, ema_period=ENVELOPE_EMA_PERIOD, pct=ENVELOPE_PCT):
+def _ma_envelope_analysis(df, ema_period=ENVELOPE_EMA_PERIOD, pct=None):
+    if pct is None:
+        pct = intraday_envelope_decimal()
     empty_sig = {"signal": None, "target": None, "stop": None, "entry_bar_idx": None}
     min_bars = ema_period + 2
     if len(df) < min_bars:
@@ -271,8 +275,10 @@ def _ma_envelope_analysis(df, ema_period=ENVELOPE_EMA_PERIOD, pct=ENVELOPE_PCT):
 
 
 def simulate_envelope_trade_close(
-    df, entry_bar_idx, entry_price, signal, qty, ema_period=ENVELOPE_EMA_PERIOD, pct=ENVELOPE_PCT
+    df, entry_bar_idx, entry_price, signal, qty, ema_period=ENVELOPE_EMA_PERIOD, pct=None
 ):
+    if pct is None:
+        pct = intraday_envelope_decimal()
     last_idx = len(df) - 1
     close = df["close"]
     _, upper, lower = _envelope_series(df, ema_period, pct)
@@ -309,12 +315,14 @@ def add_ma_envelope_line_traces(
     fig,
     df,
     ema_period=ENVELOPE_EMA_PERIOD,
-    pct=ENVELOPE_PCT,
+    pct=None,
     *,
     include_price_bands: bool = True,
     row: int | None = None,
     col: int | None = None,
 ):
+    if pct is None:
+        pct = intraday_envelope_decimal()
     if df is None or df.empty or len(df) < ema_period:
         return
     x = df["date"]

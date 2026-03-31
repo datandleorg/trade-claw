@@ -12,11 +12,11 @@ from trade_claw.constants import (
     DEFAULT_INTERVALS,
     DEFAULT_INTRADAY_INTERVAL,
     ENVELOPE_EMA_PERIOD,
-    ENVELOPE_PCT,
     NIFTY50_DEFAULT_SELECTED,
     NIFTY50_SYMBOLS,
     NSE_EXCHANGE,
 )
+from trade_claw.env_trading_params import intraday_envelope_decimal
 from trade_claw.market_data import candles_to_dataframe, get_instrument_token
 from trade_claw.pl_style import pl_markdown, pl_title_color, style_pl_dataframe
 from trade_claw.strategies import (
@@ -167,7 +167,7 @@ def render_all_ten(kite):
                             sig["signal"],
                             qty,
                             sig.get("ema_period", ENVELOPE_EMA_PERIOD),
-                            sig.get("pct", ENVELOPE_PCT),
+                            sig.get("pct", intraday_envelope_decimal()),
                         )
                     elif sig.get("signal") and sig.get("target") is not None and sig.get("stop") is not None:
                         if entry_bar_idx is not None and 0 <= entry_bar_idx < len(df):
@@ -358,7 +358,7 @@ def render_all_ten(kite):
                                 sig["signal"],
                                 qty,
                                 sig.get("ema_period", ENVELOPE_EMA_PERIOD),
-                                sig.get("pct", ENVELOPE_PCT),
+                                sig.get("pct", intraday_envelope_decimal()),
                             )
                             ue = sig.get("upper_at_entry", 0)
                             le = sig.get("lower_at_entry", 0)

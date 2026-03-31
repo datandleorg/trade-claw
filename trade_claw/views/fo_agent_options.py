@@ -18,8 +18,6 @@ from trade_claw.constants import (
     FO_ENVELOPE_BANDWIDTH_MIN_PCT,
     FO_ENVELOPE_BANDWIDTH_STEP,
     FO_INDEX_UNDERLYING_LABELS,
-    FO_OPTION_STOP_LOSS_PCT,
-    FO_OPTION_TARGET_PCT,
     FO_STRATEGY_ENVELOPE,
     FO_STRATEGY_MA_CROSS,
     FO_STRATEGY_OPTIONS,
@@ -30,6 +28,7 @@ from trade_claw.constants import (
     NFO_EXCHANGE,
     NSE_EXCHANGE,
 )
+from trade_claw.env_trading_params import option_stop_premium_fraction, option_target_premium_fraction
 from trade_claw.fo_openai_agent import configure_fo_agent_logging, get_openai_api_key, run_fo_agent_pipeline
 from trade_claw.mock_market_signal import (
     fo_options_default_envelope_bandwidth_pct,
@@ -196,8 +195,8 @@ def render_fo_agent_options(kite):
             step=float(FO_ENVELOPE_BANDWIDTH_STEP),
             key="foa_envelope_bandwidth_pct",
             help=(
-                "Default follows **`MOCK_AGENT_ENVELOPE_PCT`** (else `ENVELOPE_PCT` in code). "
-                f"Resolved: **{100 * mock_agent_envelope_pct():.4f}%** each side."
+                "Default follows **`MOCK_AGENT_ENVELOPE_PCT`** when set; else mock default "
+                f"(**{100 * mock_agent_envelope_pct():.2f}%** each side, clamped to slider max)."
             ),
         )
         envelope_pct = envelope_bw_pct / 100.0
@@ -362,13 +361,16 @@ def render_fo_agent_options(kite):
             st.metric("Txn brk+tax", _abbrev_rupee(total_txn_cost))
 
         st.markdown(f"**Net P/L:** {pl_markdown(total_pl)}")
+        _stp = option_stop_premium_fraction()
+        _tgt = option_target_premium_fraction()
         _sl_txt = (
-            f"stop −{100 * FO_OPTION_STOP_LOSS_PCT:.0f}% on bar low (same-bar: target wins)"
-            if FO_OPTION_STOP_LOSS_PCT > 0
-            else "no stop (set FO_OPTION_STOP_LOSS_PCT>0 in env)"
+            f"stop −{100 * _stp:.0f}% on bar low (same-bar: target wins)"
+            if _stp > 0
+            else "no stop (`FO_OPTION_STOP_LOSS_PCT` or mock stop env; set >0 for a stop)"
         )
         st.caption(
-            f"Exit rule: target +{100 * FO_OPTION_TARGET_PCT:.0f}% on premium high; {_sl_txt}; else EOD. "
+            f"Exit rule: target +{100 * _tgt:.0f}% on premium high; {_sl_txt}; else EOD. "
+            "Defaults from `.env` via `trade_claw.env_trading_params` (mock keys first, then `FO_OPTION_*`). "
             "1 lot; costs per lot as entered."
         )
 

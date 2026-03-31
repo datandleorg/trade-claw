@@ -5,6 +5,7 @@ import html
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from trade_claw.constants import (
     DEFAULT_INTERVALS,
@@ -18,8 +19,6 @@ from trade_claw.constants import (
     FO_ENVELOPE_BANDWIDTH_MAX_PCT,
     FO_ENVELOPE_BANDWIDTH_MIN_PCT,
     FO_ENVELOPE_BANDWIDTH_STEP,
-    FO_OPTION_STOP_LOSS_PCT,
-    FO_OPTION_TARGET_PCT,
     FO_STRATEGY_ENVELOPE,
     FO_STRATEGY_MA_CROSS,
     FO_STRATEGY_OPTIONS,
@@ -35,6 +34,8 @@ from trade_claw.constants import (
 from trade_claw.fo_options_persist import fingerprint_params, save_fo_options_snapshot
 from trade_claw.fo_runner import run_fo_underlying_one_day
 from trade_claw.mock_market_signal import (
+    fo_option_stop_loss_pct_runtime,
+    fo_option_target_pct_runtime,
     fo_options_default_envelope_bandwidth_pct,
     fo_options_default_option_stop_loss_pct_ui,
     fo_options_default_option_target_pct_ui,
@@ -67,6 +68,414 @@ FO_OPTIONS_DETAIL_COLS = [
     "P/L",
     "Value",
 ]
+
+# Web-audio beep loop (iframe removed on dismiss / rerun → tone stops)
+_FO_ALERT_BEEP_HTML = """
+<div style="height:0;width:0;overflow:hidden" aria-hidden="true">
+<script>
+(function () {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  const ctx = new Ctx();
+  function ping() {
+    if (ctx.state === "suspended") ctx.resume();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = "sine";
+    o.frequency.value = 880;
+    o.connect(g);
+    g.connect(ctx.destination);
+    const t = ctx.currentTime;
+    g.gain.setValueAtTime(0.12, t);
+    g.gain.exponentialRampToValueAtTime(0.01, t + 0.14);
+    o.start(t);
+    o.stop(t + 0.14);
+  }
+  ping();
+  setInterval(ping, 480);
+})();
+</script>
+</div>
+"""
+
+
+def _fo_num_for_alert_fp(x) -> str:
+    try:
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return ""
+        return f"{float(x):.4f}"
+    except (TypeError, ValueError):
+        return str(x)
+
+
+def _fo_trade_alert_fingerprint(r: dict) -> str:
+    lots = int(pd.to_numeric(r.get("Lots"), errors="coerce") or 0)
+    if lots < 1:
+        return ""
+    return "|".join(
+        [
+            str(r.get("Option", "") or ""),
+            _fo_num_for_alert_fp(r.get("Strike")),
+            str(r.get("Leg", "") or ""),
+            str(r.get("Signal", "") or ""),
+            _fo_num_for_alert_fp(r.get("Entry")),
+        ]
+    )
+
+
+def _fo_trade_alert_payload_lines(r: dict) -> list[str]:
+    pairs = [
+        ("Underlying", "Underlying"),
+        ("Name", "Name"),
+        ("Leg", "Leg"),
+        ("Option", "Option"),
+        ("Strike", "Strike"),
+        ("Signal", "Signal"),
+        ("Entry", "Entry (₹)"),
+        ("Target prem.", "Target (₹)"),
+        ("Stop prem.", "Stop (₹)"),
+        ("Lots", "Lots"),
+        ("Qty", "Qty"),
+        ("Closed at", "Closed at"),
+    ]
+    lines: list[str] = []
+    for k, label in pairs:
+        v = r.get(k)
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            continue
+        if isinstance(v, float):
+            lines.append(f"**{label}:** {v:,.2f}" if k in ("Entry", "Strike", "Target prem.", "Stop prem.") else f"**{label}:** {v}")
+        else:
+            lines.append(f"**{label}:** {v}")
+    return lines
+
+
+def _fo_sync_slider_session_from_env_defaults() -> None:
+    """
+    Push env-derived defaults into widget session_state when they change.
+
+    Fixes stale Streamlit slider keys across reruns; defaults match current ``.env`` via
+    :mod:`trade_claw.env_trading_params` (call-time reads).
+    """
+    ss = st.session_state
+    sig = "|".join(
+        [
+            f"{mock_agent_envelope_pct():.12g}",
+            f"{fo_options_default_option_target_pct_ui():.12g}",
+            f"{fo_options_default_option_stop_loss_pct_ui():.12g}",
+        ]
+    )
+    if ss.get("fo_options_env_defaults_sig") == sig:
+        return
+    ss["fo_options_env_defaults_sig"] = sig
+    ss["fo_envelope_bandwidth_pct"] = float(round(fo_options_default_envelope_bandwidth_pct(), 4))
+    ss["fo_option_target_pct_ui"] = float(fo_options_default_option_target_pct_ui())
+    ss["fo_option_stop_loss_pct_ui"] = float(fo_options_default_option_stop_loss_pct_ui())
+
+
+def _fo_run_context(kite, nse, nfo, symbol_to_name: dict) -> dict:
+    ss = st.session_state
+    underlying = ss["fo_underlying_single"]
+    strategy_choice = ss["fo_strategy_choice"]
+    strategy_is_envelope = strategy_choice == FO_STRATEGY_ENVELOPE
+    chosen_date = ss["fo_date"]
+    chosen_interval = ss["fo_interval"]
+    if strategy_is_envelope:
+        envelope_bw_pct = float(ss["fo_envelope_bandwidth_pct"])
+        envelope_pct = envelope_bw_pct / 100.0
+    else:
+        envelope_pct = mock_agent_envelope_pct()
+        envelope_bw_pct = float(round(100 * envelope_pct, 4))
+    brokerage = float(ss["fo_brokerage_per_lot"])
+    taxes = float(ss["fo_taxes_per_lot"])
+    option_target_pct_ui = float(ss["fo_option_target_pct_ui"])
+    option_stop_loss_pct_ui = float(ss["fo_option_stop_loss_pct_ui"])
+    option_target_pct = option_target_pct_ui / 100.0
+    option_stop_loss_pct = option_stop_loss_pct_ui / 100.0
+    strike_policy_label = ss["fo_strike_policy"]
+    steps_from_atm = FO_STRIKE_POLICY_STEPS[FO_STRIKE_POLICY_LABELS.index(strike_policy_label)]
+    manual_raw = ss.get("fo_manstrike_single", 0)
+    manual_strike_val = float(manual_raw) if manual_raw and float(manual_raw) > 0 else None
+    name = _fo_display_name(symbol_to_name, underlying)
+    common_kw = {
+        "kite": kite,
+        "nse_instruments": nse,
+        "nfo_instruments": nfo,
+        "session_date": chosen_date,
+        "chosen_interval": chosen_interval,
+        "strategy_is_envelope": strategy_is_envelope,
+        "envelope_pct": envelope_pct,
+        "strategy_choice": strategy_choice,
+        "steps_from_atm": steps_from_atm,
+        "strike_policy_label": strike_policy_label,
+        "manual_strike_val": manual_strike_val,
+        "brokerage_per_lot_rt": brokerage,
+        "taxes_per_lot_rt": taxes,
+        "option_stop_loss_pct": option_stop_loss_pct,
+        "option_target_pct": option_target_pct,
+    }
+    return {
+        "common_kw": common_kw,
+        "name": name,
+        "chosen_date": chosen_date,
+        "underlying": underlying,
+        "envelope_pct": envelope_pct,
+        "envelope_bw_pct": envelope_bw_pct,
+        "strategy_is_envelope": strategy_is_envelope,
+        "strategy_choice": strategy_choice,
+        "option_target_pct": option_target_pct,
+        "option_stop_loss_pct": option_stop_loss_pct,
+        "option_target_pct_ui": option_target_pct_ui,
+        "option_stop_loss_pct_ui": option_stop_loss_pct_ui,
+    }
+
+
+def _fo_run_selected_once(ctx: dict) -> tuple[list[dict], list, dict, dict, str]:
+    rows_out = [
+        run_fo_underlying_one_day(
+            underlying=ctx["underlying"],
+            name=ctx["name"],
+            include_chart_data=True,
+            **ctx["common_kw"],
+        )
+    ]
+    trade_rows = [r["trade"] for r in rows_out if r.get("trade")]
+    total_trades = len(trade_rows)
+    total_finished = sum(1 for t in trade_rows if t.get("Closed at") in FO_CLOSED_AT_REALISED)
+    realised_pl = sum(t["P/L"] for t in trade_rows if t.get("Closed at") in FO_CLOSED_AT_REALISED)
+    unrealised_pl = sum(t["P/L"] for t in trade_rows if t.get("Closed at") == "EOD")
+    total_pl = realised_pl + unrealised_pl
+    total_traded_value = sum(t["Value"] for t in trade_rows)
+    total_txn_cost = sum(t.get("Txn cost", 0.0) for t in trade_rows)
+    metrics = {
+        "total_trades": total_trades,
+        "total_finished": total_finished,
+        "target_exits": sum(1 for t in trade_rows if t.get("Closed at") == "Target"),
+        "stop_exits": sum(1 for t in trade_rows if t.get("Closed at") == "Stop"),
+        "eod_exits": sum(1 for t in trade_rows if t.get("Closed at") == "EOD"),
+        "realised_pl_net": realised_pl,
+        "eod_pl_net": unrealised_pl,
+        "total_pl_net": total_pl,
+        "total_traded_value": total_traded_value,
+        "total_txn_cost": total_txn_cost,
+    }
+    run_params = {
+        "underlying": ctx["underlying"],
+        "name": ctx["name"],
+        "session_date": ctx["chosen_date"].isoformat(),
+        "chosen_interval": ctx["common_kw"]["chosen_interval"],
+        "strategy_choice": ctx["strategy_choice"],
+        "strategy_is_envelope": ctx["strategy_is_envelope"],
+        "envelope_pct": ctx["envelope_pct"],
+        "envelope_bw_pct": ctx["envelope_bw_pct"],
+        "envelope_ema_period": ENVELOPE_EMA_PERIOD,
+        "ma_ema_fast": MA_EMA_FAST,
+        "ma_ema_slow": MA_EMA_SLOW,
+        "brokerage_per_lot_rt": ctx["common_kw"]["brokerage_per_lot_rt"],
+        "taxes_per_lot_rt": ctx["common_kw"]["taxes_per_lot_rt"],
+        "option_stop_loss_pct": ctx["option_stop_loss_pct"],
+        "option_target_pct": ctx["option_target_pct"],
+        "option_target_pct_default_constant": fo_option_target_pct_runtime(),
+        "option_stop_loss_pct_default_constant": fo_option_stop_loss_pct_runtime(),
+        "strike_policy_label": ctx["common_kw"]["strike_policy_label"],
+        "steps_from_atm": ctx["common_kw"]["steps_from_atm"],
+        "manual_strike_val": ctx["common_kw"]["manual_strike_val"],
+    }
+    fp_now = fingerprint_params(run_params)
+    return rows_out, trade_rows, metrics, run_params, fp_now
+
+
+def _fo_persist_fo_snapshot(run_params: dict, rows_out: list[dict], metrics: dict) -> None:
+    fp_now = fingerprint_params(run_params)
+    last_fp = st.session_state.get("fo_options_last_persisted_fp")
+    if last_fp != fp_now:
+        try:
+            saved_path = save_fo_options_snapshot(
+                params=run_params,
+                rows_out=rows_out,
+                metrics=metrics,
+            )
+            st.session_state["fo_options_last_persisted_fp"] = fp_now
+            st.session_state["fo_options_last_saved_path"] = str(saved_path)
+            toast = getattr(st, "toast", None)
+            if callable(toast):
+                st.toast(f"Saved run snapshot: {saved_path.name}", icon="💾")
+            else:
+                st.sidebar.success(f"Saved run: `{saved_path.name}`")
+        except OSError as e:
+            st.warning(f"Could not save run snapshot to disk: {e}")
+
+
+def _fo_watch_process_trade_alert(r0: dict) -> None:
+    cur = _fo_trade_alert_fingerprint(r0)
+    prev = st.session_state.get("fo_watch_prev_fp", "")
+    ack = st.session_state.get("fo_watch_ack_fp", "")
+    if not cur:
+        st.session_state["fo_watch_prev_fp"] = ""
+        st.session_state["fo_watch_ack_fp"] = ""
+        st.session_state["fo_show_trade_alert"] = False
+        st.session_state["fo_alert_sound_fp"] = None
+        st.session_state["fo_audio_started_fp"] = None
+        return
+    if cur != prev:
+        st.session_state["fo_watch_prev_fp"] = cur
+        if cur != ack:
+            st.session_state["fo_show_trade_alert"] = True
+            st.session_state["fo_alert_payload_lines"] = _fo_trade_alert_payload_lines(r0)
+            st.session_state["fo_alert_sound_fp"] = cur
+            st.session_state["fo_audio_started_fp"] = None
+
+
+def _fo_render_trade_alert_banner() -> None:
+    if not st.session_state.get("fo_show_trade_alert"):
+        return
+    snd = st.session_state.get("fo_alert_sound_fp")
+    if snd is not None and st.session_state.get("fo_audio_started_fp") != snd:
+        components.html(_FO_ALERT_BEEP_HTML, height=0)
+        st.session_state["fo_audio_started_fp"] = snd
+    with st.container(border=True):
+        st.markdown("#### Trade detected (selected scrip)")
+        for line in st.session_state.get("fo_alert_payload_lines") or []:
+            st.markdown(line)
+        if st.button("Dismiss — stop alert tone", key="fo_watch_dismiss_alert"):
+            st.session_state["fo_show_trade_alert"] = False
+            st.session_state["fo_watch_ack_fp"] = st.session_state.get("fo_watch_prev_fp", "")
+            st.session_state["fo_alert_sound_fp"] = None
+            st.session_state["fo_audio_started_fp"] = None
+            st.rerun()
+
+
+def _fo_render_session_block(
+    ctx: dict,
+    rows_out: list[dict],
+    trade_rows: list,
+    metrics: dict,
+    *,
+    watch_mode: bool,
+) -> None:
+    """Metrics, strategy caption, charts, and detail table for the selected underlying run."""
+    total_trades = metrics["total_trades"]
+    total_finished = metrics["total_finished"]
+    realised_pl = metrics["realised_pl_net"]
+    unrealised_pl = metrics["eod_pl_net"]
+    total_pl = metrics["total_pl_net"]
+    total_traded_value = metrics["total_traded_value"]
+    total_txn_cost = metrics["total_txn_cost"]
+    underlying = ctx["underlying"]
+    chosen_date = ctx["chosen_date"]
+    envelope_pct = ctx["envelope_pct"]
+    envelope_bw_pct = ctx["envelope_bw_pct"]
+    strategy_is_envelope = ctx["strategy_is_envelope"]
+    option_target_pct = ctx["option_target_pct"]
+    option_stop_loss_pct = ctx["option_stop_loss_pct"]
+    sk_render = "envelope" if strategy_is_envelope else "ma"
+    if watch_mode:
+        st.caption("Last refresh (auto) · selected scrip only")
+
+    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+    with m1:
+        st.metric(
+            "Option trades",
+            f"{total_trades:,}",
+            help=f"{total_trades:,} executed mock option trade(s). Hover label for full count.",
+        )
+    with m2:
+        _nt = sum(1 for t in trade_rows if t.get("Closed at") == "Target")
+        _ns = sum(1 for t in trade_rows if t.get("Closed at") == "Stop")
+        st.metric(
+            "Target / stop (realised)",
+            f"{total_finished:,}",
+            help=f"{total_finished:,} exited on target or stop ({_nt} target, {_ns} stop). EOD is separate.",
+        )
+    with m3:
+        st.markdown(
+            f"**Realised P/L (net)**<br/>{_abbrev_pl_html(realised_pl)}",
+            unsafe_allow_html=True,
+        )
+    with m4:
+        st.markdown(
+            f"**EOD P/L (net)**<br/>{_abbrev_pl_html(unrealised_pl)}",
+            unsafe_allow_html=True,
+        )
+    with m5:
+        st.markdown(
+            f"**Total P/L (net)**<br/>{_abbrev_pl_html(total_pl)}",
+            unsafe_allow_html=True,
+        )
+    with m6:
+        st.metric(
+            "Premium deployed",
+            _abbrev_rupee(total_traded_value),
+            help=f"Full: ₹{total_traded_value:,.2f}",
+        )
+    with m7:
+        st.metric(
+            "Txn brk+tax",
+            _abbrev_rupee(total_txn_cost),
+            help=f"Full: ₹{total_txn_cost:,.2f}",
+        )
+    if strategy_is_envelope:
+        st.caption(
+            f"Strategy: **{FO_STRATEGY_ENVELOPE}** — EMA{ENVELOPE_EMA_PERIOD} ±{envelope_bw_pct:.2f}% · "
+            f"target prem = entry × (1 + {option_target_pct:.2f})"
+            + (
+                f", stop prem = entry × (1 − {option_stop_loss_pct:.2f})"
+                if option_stop_loss_pct > 0
+                else " (no stop — slider at 0%)"
+            )
+            + ". Deduction = (brokerage + taxes) × **1 lot** per trade."
+        )
+    else:
+        st.caption(
+            f"Strategy: **{FO_STRATEGY_MA_CROSS}** — EMA {MA_EMA_FAST} / {MA_EMA_SLOW} · "
+            f"target prem = entry × (1 + {option_target_pct:.2f})"
+            + (
+                f", stop prem = entry × (1 − {option_stop_loss_pct:.2f})"
+                if option_stop_loss_pct > 0
+                else " (no stop — slider at 0%)"
+            )
+            + ". Deduction = (brokerage + taxes) × **1 lot** per trade."
+        )
+    st.divider()
+
+    st.markdown(f"### Charts — **{underlying}** on **{chosen_date.isoformat()}**")
+    st.caption(
+        "Envelope or EMA lines match your **Underlying strategy** dropdown. "
+        "Option chart appears only when a mock option trade was built for the session date."
+    )
+    for r in rows_out:
+        _u = str(r.get("Underlying", "row"))
+        _fo_expander_charts_single_row(
+            r,
+            chart_key_prefix=f"fo_main_{_u}",
+            sk_render=sk_render,
+            envelope_pct=envelope_pct,
+            option_target_frac=option_target_pct,
+            option_stop_loss_frac=option_stop_loss_pct,
+            expanded=False,
+            table_relative="below",
+        )
+
+    st.markdown("### Selected session (detail row)")
+    disp_rows = []
+    for r in rows_out:
+        row = {k: r[k] for k in FO_OPTIONS_DETAIL_COLS if k in r}
+        sd = row.get("Session date")
+        if sd is not None and hasattr(sd, "isoformat"):
+            row["Session date"] = sd.isoformat()
+        disp_rows.append(row)
+    disp = pd.DataFrame(disp_rows)
+    if not disp.empty:
+        _fmt = _fo_table_formatters()
+        styled = style_pl_dataframe(
+            disp.style.format(_fmt, na_rep="—"),
+            "P/L",
+            "P/L gross",
+        )
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+    if trade_rows:
+        _tpl = sum(t["P/L"] for t in trade_rows)
+        st.markdown(f"**Session net P/L (if trade executed):** {pl_markdown(_tpl)}")
 
 
 def _abbrev_rupee(x: float) -> str:
@@ -115,11 +524,18 @@ def _fo_expander_charts_single_row(
     chart_key_prefix: str,
     sk_render: str,
     envelope_pct: float,
+    option_target_frac: float | None = None,
+    option_stop_loss_frac: float | None = None,
     expanded: bool = False,
     table_relative: str = "below",
 ) -> None:
     """Underlying + option candle charts and strategy caption for one mock F&O row."""
     _kpre = _fo_sanitize_st_key(chart_key_prefix)
+    _chart_sig = (
+        f"{float(envelope_pct):.8f}_"
+        f"{float(option_target_frac if option_target_frac is not None else -1.0):.6f}_"
+        f"{float(option_stop_loss_frac if option_stop_loss_frac is not None else -1.0):.6f}"
+    )
     df_u = r.get("df_u")
     u = r.get("Underlying", "—")
     nm = r.get("Name", "")
@@ -193,7 +609,7 @@ def _fo_expander_charts_single_row(
                 height=320,
                 xaxis_rangeslider_visible=False,
             )
-            st.plotly_chart(fig_u, use_container_width=True, key=f"{_kpre}_spot")
+            st.plotly_chart(fig_u, use_container_width=True, key=f"{_kpre}_spot_{_chart_sig}")
         with c2:
             if t and df_o is not None and not df_o.empty:
                 st.markdown("**Option premium (mock exit)**")
@@ -234,8 +650,29 @@ def _fo_expander_charts_single_row(
                 _net = float(t["P/L"])
                 _gross = float(t.get("P/L gross", _net))
                 _txn = float(t.get("Txn cost", 0.0))
-                _tp = t.get("Target prem.")
-                _sp = t.get("Stop prem.")
+                _tp = None
+                _sp = None
+                try:
+                    _ev = float(t.get("Entry"))
+                except (TypeError, ValueError):
+                    _ev = float("nan")
+                if (
+                    option_target_frac is not None
+                    and not pd.isna(_ev)
+                    and _ev > 0
+                ):
+                    _tp = _ev * (1.0 + float(option_target_frac))
+                if _tp is None:
+                    _tp = t.get("Target prem.")
+                if (
+                    option_stop_loss_frac is not None
+                    and float(option_stop_loss_frac) > 0
+                    and not pd.isna(_ev)
+                    and _ev > 0
+                ):
+                    _sp = _ev * (1.0 - float(option_stop_loss_frac))
+                if _sp is None:
+                    _sp = t.get("Stop prem.")
                 if _tp is not None and not pd.isna(_tp):
                     fig_o.add_hline(
                         y=float(_tp),
@@ -244,7 +681,10 @@ def _fo_expander_charts_single_row(
                         annotation_text="Target",
                         annotation_position="right",
                     )
-                if _sp is not None and not pd.isna(_sp):
+                _draw_stop = _sp is not None and not pd.isna(_sp)
+                if _draw_stop and option_stop_loss_frac is not None and float(option_stop_loss_frac) <= 0:
+                    _draw_stop = False
+                if _draw_stop:
                     fig_o.add_hline(
                         y=float(_sp),
                         line_dash="dash",
@@ -263,7 +703,7 @@ def _fo_expander_charts_single_row(
                     height=320,
                     xaxis_rangeslider_visible=False,
                 )
-                st.plotly_chart(fig_o, use_container_width=True, key=f"{_kpre}_opt")
+                st.plotly_chart(fig_o, use_container_width=True, key=f"{_kpre}_opt_{_chart_sig}")
             else:
                 st.markdown("**Option premium**")
                 st.info(
@@ -451,19 +891,18 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
         index=_int_idx,
         key="fo_interval",
     )
+    _fo_sync_slider_session_from_env_defaults()
     if strategy_is_envelope:
-        _env_bw_default = fo_options_default_envelope_bandwidth_pct()
         envelope_bw_pct = st.slider(
             "Envelope bandwidth (% each side of EMA)",
             min_value=float(FO_ENVELOPE_BANDWIDTH_MIN_PCT),
             max_value=float(FO_ENVELOPE_BANDWIDTH_MAX_PCT),
-            value=float(round(_env_bw_default, 4)),
             step=float(FO_ENVELOPE_BANDWIDTH_STEP),
             key="fo_envelope_bandwidth_pct",
             help=(
                 "Upper band = EMA × (1 + p), lower = EMA × (1 − p), with p = this % ÷ 100. "
-                f"Default follows **`MOCK_AGENT_ENVELOPE_PCT`** (else code `ENVELOPE_PCT`, "
-                f"currently {100 * mock_agent_envelope_pct():.4f}% each side)."
+                f"Default follows **`MOCK_AGENT_ENVELOPE_PCT`** when set; else mock default "
+                f"({100 * mock_agent_envelope_pct():.2f}% each side, clamped to slider max)."
             ),
         )
         envelope_pct = envelope_bw_pct / 100.0
@@ -495,21 +934,18 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
             help="STT, stamp, exchange—your lump sum per lot for the full round trip.",
         )
 
-    _tg_default = fo_options_default_option_target_pct_ui()
-    _sl_default = fo_options_default_option_stop_loss_pct_ui()
     sl1, sl2 = st.columns(2)
     with sl1:
         option_target_pct_ui = st.slider(
             "Target above entry (premium %)",
             min_value=0.5,
             max_value=200.0,
-            value=_tg_default,
             step=0.5,
             key="fo_option_target_pct_ui",
             help=(
                 "Exit when option bar **high** ≥ entry × (1 + %/100). "
-                "Default from **`MOCK_ENGINE_OPTION_TARGET_PCT`** if set, else **`FO_OPTION_TARGET_PCT`** "
-                f"({100 * FO_OPTION_TARGET_PCT:.1f}%). Same-bar as stop: **target wins**."
+                "Resolved in **`trade_claw.env_trading_params`**: **`MOCK_ENGINE_OPTION_TARGET_PCT`** if set, else **`FO_OPTION_TARGET_PCT`** "
+                f"({100 * fo_option_target_pct_runtime():.1f}%). Same-bar as stop: **target wins**."
             ),
         )
     with sl2:
@@ -517,12 +953,11 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
             "Stop loss below entry (premium %)",
             min_value=0.0,
             max_value=50.0,
-            value=_sl_default,
             step=0.5,
             key="fo_option_stop_loss_pct_ui",
             help=(
                 "**0** = no stop (only target or EOD). Otherwise exit when option bar **low** ≤ entry × (1 − %/100). "
-                "Default from **`MOCK_ENGINE_OPTION_STOP_PCT`** / **`MOCK_ENGINE_STOP_LOSS_CLAMP_PCT`** if set, "
+                "Resolved in **`trade_claw.env_trading_params`**: **`MOCK_ENGINE_OPTION_STOP_PCT`** / **`MOCK_ENGINE_STOP_LOSS_CLAMP_PCT`** if set, "
                 "else **`FO_OPTION_STOP_LOSS_PCT`**. Same-bar as target: **target wins** (same as cash BUY)."
             ),
         )
@@ -538,7 +973,7 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
         "P/L **net** = gross premium P/L − (brokerage + tax) × 1 lot."
     )
 
-    strike_policy_label = st.selectbox(
+    st.selectbox(
         "Option strike vs spot",
         options=FO_STRIKE_POLICY_LABELS,
         index=0,
@@ -550,9 +985,8 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
             "Expiry is always **on or after the session day**, picked from Kite’s current NFO chain (nearest first)."
         ),
     )
-    steps_from_atm = FO_STRIKE_POLICY_STEPS[FO_STRIKE_POLICY_LABELS.index(strike_policy_label)]
 
-    manual_strike_raw = st.number_input(
+    st.number_input(
         "Manual strike override (0 = use strike policy only)",
         min_value=0,
         max_value=10_000_000,
@@ -561,205 +995,72 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
         key="fo_manstrike_single",
         help="When >0, nearest listed strike to this value is used for the selected underlying.",
     )
-    manual_strike_val = float(manual_strike_raw) if manual_strike_raw and float(manual_strike_raw) > 0 else None
 
-    name = _fo_display_name(symbol_to_name, underlying)
-
-    _fo_common_kw = {
-        "kite": kite,
-        "nse_instruments": nse,
-        "nfo_instruments": nfo,
-        "session_date": chosen_date,
-        "chosen_interval": chosen_interval,
-        "strategy_is_envelope": strategy_is_envelope,
-        "envelope_pct": envelope_pct,
-        "strategy_choice": strategy_choice,
-        "steps_from_atm": steps_from_atm,
-        "strike_policy_label": strike_policy_label,
-        "manual_strike_val": manual_strike_val,
-        "brokerage_per_lot_rt": brokerage_per_lot_rt,
-        "taxes_per_lot_rt": taxes_per_lot_rt,
-        "option_stop_loss_pct": option_stop_loss_pct,
-        "option_target_pct": option_target_pct,
-    }
-
-    rows_out: list[dict] = []
-
-    with st.spinner(f"Running {strategy_choice} + options for **{underlying}** on **{chosen_date}**..."):
-        rows_out.append(
-            run_fo_underlying_one_day(
-                underlying=underlying,
-                name=name,
-                include_chart_data=True,
-                **_fo_common_kw,
-            )
-        )
-
-    trade_rows = [r["trade"] for r in rows_out if r.get("trade")]
-    total_trades = len(trade_rows)
-    total_finished = sum(1 for t in trade_rows if t.get("Closed at") in FO_CLOSED_AT_REALISED)
-    realised_pl = sum(t["P/L"] for t in trade_rows if t.get("Closed at") in FO_CLOSED_AT_REALISED)
-    unrealised_pl = sum(t["P/L"] for t in trade_rows if t.get("Closed at") == "EOD")
-    total_pl = realised_pl + unrealised_pl
-    total_traded_value = sum(t["Value"] for t in trade_rows)
-    total_txn_cost = sum(t.get("Txn cost", 0.0) for t in trade_rows)
-
-    run_params = {
-        "underlying": underlying,
-        "name": name,
-        "session_date": chosen_date.isoformat(),
-        "chosen_interval": chosen_interval,
-        "strategy_choice": strategy_choice,
-        "strategy_is_envelope": strategy_is_envelope,
-        "envelope_pct": envelope_pct,
-        "envelope_bw_pct": envelope_bw_pct,
-        "envelope_ema_period": ENVELOPE_EMA_PERIOD,
-        "ma_ema_fast": MA_EMA_FAST,
-        "ma_ema_slow": MA_EMA_SLOW,
-        "brokerage_per_lot_rt": brokerage_per_lot_rt,
-        "taxes_per_lot_rt": taxes_per_lot_rt,
-        "option_stop_loss_pct": option_stop_loss_pct,
-        "option_target_pct": option_target_pct,
-        "option_target_pct_default_constant": FO_OPTION_TARGET_PCT,
-        "option_stop_loss_pct_default_constant": FO_OPTION_STOP_LOSS_PCT,
-        "strike_policy_label": strike_policy_label,
-        "steps_from_atm": steps_from_atm,
-        "manual_strike_val": manual_strike_val,
-    }
-    metrics = {
-        "total_trades": total_trades,
-        "total_finished": total_finished,
-        "target_exits": sum(1 for t in trade_rows if t.get("Closed at") == "Target"),
-        "stop_exits": sum(1 for t in trade_rows if t.get("Closed at") == "Stop"),
-        "eod_exits": sum(1 for t in trade_rows if t.get("Closed at") == "EOD"),
-        "realised_pl_net": realised_pl,
-        "eod_pl_net": unrealised_pl,
-        "total_pl_net": total_pl,
-        "total_traded_value": total_traded_value,
-        "total_txn_cost": total_txn_cost,
-    }
-    fp_now = fingerprint_params(run_params)
-    last_fp = st.session_state.get("fo_options_last_persisted_fp")
-    if last_fp != fp_now:
-        try:
-            saved_path = save_fo_options_snapshot(
-                params=run_params,
-                rows_out=rows_out,
-                metrics=metrics,
-            )
-            st.session_state["fo_options_last_persisted_fp"] = fp_now
-            st.session_state["fo_options_last_saved_path"] = str(saved_path)
-            toast = getattr(st, "toast", None)
-            if callable(toast):
-                st.toast(f"Saved run snapshot: {saved_path.name}", icon="💾")
-            else:
-                st.sidebar.success(f"Saved run: `{saved_path.name}`")
-        except OSError as e:
-            st.warning(f"Could not save run snapshot to disk: {e}")
-
-    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
-    with m1:
-        st.metric(
-            "Option trades",
-            f"{total_trades:,}",
-            help=f"{total_trades:,} executed mock option trade(s). Hover label for full count.",
-        )
-    with m2:
-        _nt = sum(1 for t in trade_rows if t.get("Closed at") == "Target")
-        _ns = sum(1 for t in trade_rows if t.get("Closed at") == "Stop")
-        st.metric(
-            "Target / stop (realised)",
-            f"{total_finished:,}",
-            help=f"{total_finished:,} exited on target or stop ({_nt} target, {_ns} stop). EOD is separate.",
-        )
-    with m3:
-        st.markdown(
-            f"**Realised P/L (net)**<br/>{_abbrev_pl_html(realised_pl)}",
-            unsafe_allow_html=True,
-        )
-    with m4:
-        st.markdown(
-            f"**EOD P/L (net)**<br/>{_abbrev_pl_html(unrealised_pl)}",
-            unsafe_allow_html=True,
-        )
-    with m5:
-        st.markdown(
-            f"**Total P/L (net)**<br/>{_abbrev_pl_html(total_pl)}",
-            unsafe_allow_html=True,
-        )
-    with m6:
-        st.metric(
-            "Premium deployed",
-            _abbrev_rupee(total_traded_value),
-            help=f"Full: ₹{total_traded_value:,.2f}",
-        )
-    with m7:
-        st.metric(
-            "Txn brk+tax",
-            _abbrev_rupee(total_txn_cost),
-            help=f"Full: ₹{total_txn_cost:,.2f}",
-        )
-    if strategy_is_envelope:
-        st.caption(
-            f"Strategy: **{FO_STRATEGY_ENVELOPE}** — EMA{ENVELOPE_EMA_PERIOD} ±{envelope_bw_pct:.2f}% · "
-            f"target prem = entry × (1 + {option_target_pct:.2f})"
-            + (
-                f", stop prem = entry × (1 − {option_stop_loss_pct:.2f})"
-                if option_stop_loss_pct > 0
-                else " (no stop — slider at 0%)"
-            )
-            + ". Deduction = (brokerage + taxes) × **1 lot** per trade."
-        )
-    else:
-        st.caption(
-            f"Strategy: **{FO_STRATEGY_MA_CROSS}** — EMA {MA_EMA_FAST} / {MA_EMA_SLOW} · "
-            f"target prem = entry × (1 + {option_target_pct:.2f})"
-            + (
-                f", stop prem = entry × (1 − {option_stop_loss_pct:.2f})"
-                if option_stop_loss_pct > 0
-                else " (no stop — slider at 0%)"
-            )
-            + ". Deduction = (brokerage + taxes) × **1 lot** per trade."
-        )
     st.divider()
-
-    st.markdown(f"### Charts — **{underlying}** on **{chosen_date.isoformat()}**")
-    st.caption(
-        "Envelope or EMA lines match your **Underlying strategy** dropdown. "
-        "Option chart appears only when a mock option trade was built for the session date."
+    watch_sel = st.checkbox(
+        "Watch selected scrip: auto-refresh every 5 seconds",
+        key="fo_watch_5s",
+        help=(
+            "Re-runs **only** the **Underlying** dropdown with your current settings. "
+            "Best on **today’s session** while new minute bars arrive. "
+            "Beeps (browser permitting) and shows a banner when a **mock trade first appears** (Lots > 0). "
+            "**Dismiss** stops the tone."
+        ),
     )
+
+    ctx = _fo_run_context(kite, nse, nfo, symbol_to_name)
+    _fo_common_kw = ctx["common_kw"]
+    underlying = ctx["underlying"]
+    chosen_date = ctx["chosen_date"]
+    envelope_pct = ctx["envelope_pct"]
+    envelope_bw_pct = ctx["envelope_bw_pct"]
+    strategy_is_envelope = ctx["strategy_is_envelope"]
+    strategy_choice = ctx["strategy_choice"]
+    option_target_pct = ctx["option_target_pct"]
+    option_stop_loss_pct = ctx["option_stop_loss_pct"]
     sk_render = "envelope" if strategy_is_envelope else "ma"
-    for r in rows_out:
-        _u = str(r.get("Underlying", "row"))
-        _fo_expander_charts_single_row(
-            r,
-            chart_key_prefix=f"fo_main_{_u}",
-            sk_render=sk_render,
-            envelope_pct=envelope_pct,
-            expanded=False,
-            table_relative="below",
+
+    if watch_sel:
+        st.caption(
+            f"**Live watch:** refreshing **{underlying}** every **5s** (selected scrip only). "
+            "Charts and metrics in the block below update on each tick. "
+            "**All scrips / index** sections further down refresh only after you change a control or turn watch off."
         )
 
-    st.markdown("### Selected session (detail row)")
-    disp_rows = []
-    for r in rows_out:
-        row = {k: r[k] for k in FO_OPTIONS_DETAIL_COLS if k in r}
-        sd = row.get("Session date")
-        if sd is not None and hasattr(sd, "isoformat"):
-            row["Session date"] = sd.isoformat()
-        disp_rows.append(row)
-    disp = pd.DataFrame(disp_rows)
-    if not disp.empty:
-        _fmt = _fo_table_formatters()
-        styled = style_pl_dataframe(
-            disp.style.format(_fmt, na_rep="—"),
-            "P/L",
-            "P/L gross",
-        )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
-    if trade_rows:
-        _tpl = sum(t["P/L"] for t in trade_rows)
-        st.markdown(f"**Session net P/L (if trade executed):** {pl_markdown(_tpl)}")
+        @st.fragment(run_every=timedelta(seconds=5))
+        def _fo_watch_fragment():
+            ctx_w = _fo_run_context(kite, nse, nfo, symbol_to_name)
+            rows_local, trade_rows_l, metrics_l, run_params_l, fp_l = _fo_run_selected_once(ctx_w)
+            st.session_state["fo_options_fp_now"] = fp_l
+            st.session_state["fo_watch_cached_row"] = dict(rows_local[0])
+            _fo_persist_fo_snapshot(run_params_l, rows_local, metrics_l)
+            _fo_watch_process_trade_alert(rows_local[0])
+            _fo_render_trade_alert_banner()
+            _fo_render_session_block(ctx_w, rows_local, trade_rows_l, metrics_l, watch_mode=True)
+
+        _fo_watch_fragment()
+    else:
+        for k in (
+            "fo_show_trade_alert",
+            "fo_alert_sound_fp",
+            "fo_audio_started_fp",
+            "fo_alert_payload_lines",
+            "fo_watch_prev_fp",
+            "fo_watch_ack_fp",
+        ):
+            st.session_state.pop(k, None)
+        with st.spinner(
+            f"Running {strategy_choice} + options for **{underlying}** on **{chosen_date}**..."
+        ):
+            rows_out, trade_rows, metrics, run_params, fp_now = _fo_run_selected_once(ctx)
+        st.session_state["fo_options_fp_now"] = fp_now
+        st.session_state["fo_watch_cached_row"] = dict(rows_out[0])
+        _fo_persist_fo_snapshot(run_params, rows_out, metrics)
+        _fo_render_session_block(ctx, rows_out, trade_rows, metrics, watch_mode=False)
+
+    fp_now = str(st.session_state.get("fo_options_fp_now") or "")
+    _cached = st.session_state.get("fo_watch_cached_row")
+    rows_out = [_cached] if _cached is not None else []
 
     st.divider()
     st.markdown("### All scrips — same strategy parameters")
@@ -780,7 +1081,9 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
         ):
             for u in FO_UNDERLYING_OPTIONS:
                 nm = _fo_display_name(symbol_to_name, u)
-                if u == underlying:
+                if u == underlying and st.session_state.get("fo_watch_cached_row"):
+                    _all_rows.append(dict(st.session_state["fo_watch_cached_row"]))
+                elif u == underlying and rows_out:
                     _all_rows.append(dict(rows_out[0]))
                 else:
                     _all_rows.append(
@@ -819,6 +1122,8 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
                     chart_key_prefix=f"fo_all_{_ai}_{_u}",
                     sk_render=sk_render,
                     envelope_pct=envelope_pct,
+                    option_target_frac=option_target_pct,
+                    option_stop_loss_frac=option_stop_loss_pct,
                     expanded=False,
                     table_relative="above",
                 )
@@ -842,7 +1147,9 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
         with st.spinner(f"Index suite ({len(FO_DEFAULT_UNDERLYINGS)} underlyings) — mock F&O with chart data…"):
             for u in FO_DEFAULT_UNDERLYINGS:
                 nm = _fo_display_name(symbol_to_name, u)
-                if u == underlying:
+                if u == underlying and st.session_state.get("fo_watch_cached_row"):
+                    _ix_rows.append(dict(st.session_state["fo_watch_cached_row"]))
+                elif u == underlying and rows_out:
                     _ix_rows.append(dict(rows_out[0]))
                 else:
                     _ix_rows.append(
@@ -880,6 +1187,8 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
                 chart_key_prefix=f"fo_idx_{_ii}_{_u}",
                 sk_render=sk_render,
                 envelope_pct=envelope_pct,
+                option_target_frac=option_target_pct,
+                option_stop_loss_frac=option_stop_loss_pct,
                 expanded=False,
                 table_relative="above",
             )

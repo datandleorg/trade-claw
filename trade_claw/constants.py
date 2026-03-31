@@ -3,15 +3,14 @@ import os
 
 # Project root (parent of trade_claw package)
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SESSION_FILE = os.path.join(_ROOT, ".kite_session.json")
+_default_session = os.path.join(_ROOT, ".kite_session.json")
+# Docker: set KITE_SESSION_FILE=/app/data/.kite_session.json so Streamlit + Celery share the same login.
+SESSION_FILE = os.path.expanduser(os.environ.get("KITE_SESSION_FILE", _default_session))
 
 NSE_EXCHANGE = "NSE"
 NFO_EXCHANGE = "NFO"
 
-# F&O mock: long premium — target on bar high, stop on bar low, else EOD (see option_trades)
-FO_OPTION_TARGET_PCT = float(os.environ.get("FO_OPTION_TARGET_PCT", "0.25"))
-# Stop = exit when premium low <= entry × (1 − pct). Set env to 0 to disable stop (target/EOD only).
-FO_OPTION_STOP_LOSS_PCT = float(os.environ.get("FO_OPTION_STOP_LOSS_PCT", "0.10"))
+# F&O mock target/stop defaults: use trade_claw.env_trading_params (MOCK_ENGINE_* / FO_OPTION_* at call time).
 # NSE index F&O underlyings (keys must match Kite NFO `name` / resolver in fo_support)
 FO_INDEX_UNDERLYING_KEYS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"]
 # Human labels for UI (NIFTYNXT50 = Nifty Next 50; NFO may list as NIFTYJR or NIFTYNXT50)
@@ -27,7 +26,8 @@ FO_DEFAULT_UNDERLYINGS = list(FO_INDEX_UNDERLYING_KEYS)
 FO_CLOSED_AT_REALISED = ("Target", "Stop")
 # F&O UI: envelope distance each side as % of EMA (upper = EMA×(1+pct), lower = EMA×(1−pct))
 FO_ENVELOPE_BANDWIDTH_MIN_PCT = 0.0
-FO_ENVELOPE_BANDWIDTH_MAX_PCT = 2.0
+# Max 30% allows mock-agent default (25% / side) to fit the slider when synced from ``MOCK_AGENT_ENVELOPE_PCT``.
+FO_ENVELOPE_BANDWIDTH_MAX_PCT = 30.0
 FO_ENVELOPE_BANDWIDTH_STEP = 0.05
 # F&O page strategy dropdown (underlying signal → long CE / long PE)
 FO_STRATEGY_ENVELOPE = "MA envelope (EMA ± bandwidth)"
@@ -84,7 +84,8 @@ ALL10_STRATEGY_OPTIONS = [
 MA_EMA_FAST = 9
 MA_EMA_SLOW = 20
 ENVELOPE_EMA_PERIOD = 20
-ENVELOPE_PCT = 0.0030  # 0.30% each side of EMA (F&O / intraday UI default + mock engine when env unset)
+# Default intraday/strategy envelope when ``INTRADAY_ENVELOPE_DECIMAL`` is unset (see env_trading_params.intraday_envelope_decimal).
+ENVELOPE_PCT = 0.0030
 
 CLOSED_AT_REALISED = ("Target", "Stop", "Opposite envelope")
 

@@ -6,12 +6,11 @@ from datetime import date, datetime
 from trade_claw.constants import (
     ENVELOPE_EMA_PERIOD,
     FO_MAX_EXPIRY_CANDLE_FALLBACKS,
-    FO_OPTION_STOP_LOSS_PCT,
-    FO_OPTION_TARGET_PCT,
     MA_EMA_FAST,
     MA_EMA_SLOW,
     REPORTS_MIN_BARS_PER_DAY,
 )
+from trade_claw.env_trading_params import option_stop_premium_fraction, option_target_premium_fraction
 from trade_claw.fo_support import (
     align_option_entry_bar,
     build_option_trade_candidates,
@@ -48,8 +47,8 @@ def run_fo_underlying_one_day(
     Run full F&O mock pipeline for one calendar session day and one underlying.
     Returns a row dict aligned with fo_options table/chart expectations.
     """
-    _otp = float(FO_OPTION_TARGET_PCT if option_target_pct is None else option_target_pct)
-    _osl = float(FO_OPTION_STOP_LOSS_PCT if option_stop_loss_pct is None else option_stop_loss_pct)
+    _otp = float(option_target_premium_fraction() if option_target_pct is None else option_target_pct)
+    _osl = float(option_stop_premium_fraction() if option_stop_loss_pct is None else option_stop_loss_pct)
 
     from_dt = datetime(session_date.year, session_date.month, session_date.day, 9, 15, 0)
     to_dt = datetime(session_date.year, session_date.month, session_date.day, 15, 30, 0)

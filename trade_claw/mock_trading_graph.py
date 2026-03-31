@@ -14,12 +14,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
-from trade_claw.constants import (
-    ALLOCATED_AMOUNT,
-    ENVELOPE_EMA_PERIOD,
-    FO_INDEX_UNDERLYING_LABELS,
-)
-from trade_claw.fo_support import _to_date, fo_lot_qty_for_allocation
+from trade_claw.constants import ENVELOPE_EMA_PERIOD, FO_INDEX_UNDERLYING_LABELS
+from trade_claw.fo_support import _to_date
 from trade_claw.mock_market_signal import (
     envelope_breakout_on_last_bar,
     load_index_session_minute_df,
@@ -253,16 +249,7 @@ def build_mock_trading_graph(
         entry = max(0.01, ltp - slip)
         stop_loss = round(entry * mock_engine_option_stop_multiplier(), 2)
         target = round(entry * mock_engine_option_target_multiplier(), 2)
-        n_lots, qty_units, _ = fo_lot_qty_for_allocation(entry, lot_size, ALLOCATED_AMOUNT)
-        if n_lots < 1:
-            scan_warning(
-                "graph_err",
-                "EXECUTE sizing fail symbol=%s entry=%.2f lot_size=%s",
-                tsym,
-                entry,
-                lot_size,
-            )
-            return {"error": "Allocated amount too small for one lot at this premium"}
+        qty_units = lot_size  # mock: always 1 exchange lot (PnL uses units = lot_size)
         idx = (state.get("underlying") or "NIFTY").strip().upper()
         try:
             tid = mock_trade_store.insert_open_trade(
