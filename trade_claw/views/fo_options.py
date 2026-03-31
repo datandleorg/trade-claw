@@ -811,11 +811,9 @@ and are common for hedging and volatility trading.
 | :--- | :--- | :--- | :--- |
 | **NIFTY 50** | Very high | Medium | Balanced / hedging |
 | **BANK NIFTY** | Very high | Very high | Short-term / aggressive |
-| **FINNIFTY** | High | Medium | Financials sector |
 | **MIDCP NIFTY** | Growing | Medium–high | Midcap exposure |
-| **NIFTY NEXT 50** | Lower | Medium | Niche / longer horizon |
 
-**In this app:** pick an index from the **Underlying** dropdown (`NIFTY`, `BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY`, `NIFTYNXT50`).
+**In this app:** pick an index from the **Underlying** dropdown (`NIFTY`, `BANKNIFTY`, `MIDCPNIFTY`).
 Weekly and monthly expiries exist on the exchange; we pick the **nearest NFO expiry on or after** the session date.
 
 **Note:** Lot sizes and exact NSE index **spot** symbols come from Kite’s instrument master. If a new index fails to load,
@@ -823,37 +821,8 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
             """
         )
 
-    nav1, nav2, nav3, nav4, nav5, nav6 = st.columns(6)
-    with nav1:
-        if st.button("Intraday home", key="fo_nav_all10"):
-            st.session_state.view = "all10"
-            st.session_state.selected_symbol = None
-            st.rerun()
-    with nav2:
-        if st.button("Stock list", key="fo_nav_dash"):
-            st.session_state.view = "dashboard"
-            st.session_state.selected_symbol = None
-            st.rerun()
-    with nav3:
-        if st.button("Reports", key="fo_nav_rep"):
-            st.session_state.view = "reports"
-            st.session_state.selected_symbol = None
-            st.rerun()
-    with nav4:
-        if st.button("Index ETFs", key="fo_nav_etf"):
-            st.session_state.view = "index_etfs"
-            st.session_state.selected_symbol = None
-            st.rerun()
-    with nav5:
-        if st.button("F&O Agent", key="fo_nav_fo_agent"):
-            st.session_state.view = "fo_agent"
-            st.session_state.selected_symbol = None
-            st.rerun()
-    with nav6:
-        if st.button("Snapshots", key="fo_nav_fo_snap"):
-            st.session_state.view = "fo_snapshots"
-            st.session_state.selected_symbol = None
-            st.rerun()
+    if st.button("Mock AI engine (home)", key="fo_nav_mock_home"):
+        st.switch_page("app.py")
 
     _ndef = "NIFTY" if "NIFTY" in FO_UNDERLYING_OPTIONS else FO_UNDERLYING_OPTIONS[0]
     _u_idx = FO_UNDERLYING_OPTIONS.index(_ndef) if _ndef in FO_UNDERLYING_OPTIONS else 0

@@ -4,12 +4,14 @@ This document describes how the **NSE index options mock engine** works in trade
 
 It reflects the implementation in `trade_claw/mock_engine_run.py`, `trade_claw/mock_trading_graph.py`, `trade_claw/mock_market_signal.py`, `trade_claw/mock_trade_store.py`, and `trade_claw/kite_headless.py`. **Envelope bandwidth and option target/stop** resolve from environment variables in **`trade_claw/env_trading_params.py`** (same module as the F&O Options / F&O Agent pages); see `.env.example` — **Trading defaults**.
 
+**Envelope signal rules** (22-bar warmup, fresh cross on the last bar, optional clear margin past the band): [MOCK_ENGINE_BREAKOUT_RULES.md](MOCK_ENGINE_BREAKOUT_RULES.md).
+
 ---
 
 ## 1. Purpose and boundaries
 
 - **Mock only**: no `place_order` or live broker execution. Rows in `mock_trades` represent simulated long-premium trades.
-- **Underlying**: Configurable NSE index spot series (`MOCK_ENGINE_UNDERLYINGS`, default all keys in `FO_INDEX_UNDERLYING_KEYS`) via `fetch_underlying_intraday`. Each minute tick runs the LangGraph **once per index** that has **no** `OPEN` row for that `index_underlying`; each run evaluates the envelope on **that** index only (`signal_underlying` in initial state).
+- **Underlying**: Configurable NSE spot series (`MOCK_ENGINE_UNDERLYINGS`). **Default** = `FO_INDEX_UNDERLYING_KEYS` (NIFTY, BANKNIFTY, MIDCPNIFTY) **plus all Nifty 50 equity symbols**, in that order, via `fetch_underlying_intraday`. Each minute tick runs the LangGraph **once per underlying** that has **no** `OPEN` row for that `index_underlying`; each run evaluates the envelope on **that** symbol only (`signal_underlying` in initial state).
 - **Options**: NFO contracts on **that** index; **long-only** — bullish signals trade **CE** only, bearish **PE** only (the opposite leg is never shown to the LLM).
 - **Concurrency model**: Celery Beat triggers a scan **about once per minute** on weekdays during configured hours; Streamlit only **reads** the SQLite database and does not drive the loop.
 
@@ -136,10 +138,10 @@ flowchart LR
 
 1. If **`signal_underlying`** is set in state (Celery passes one index per invoke), only that key is scanned (must appear in **`MOCK_ENGINE_UNDERLYINGS`**). Otherwise the node scans **all** keys in order (legacy single-invoke behaviour).
 2. For each key in that list, loads **full session** spot **1-minute** candles for `session_d` from **09:15 to 15:30** (`load_index_session_minute_df` → `fetch_underlying_intraday`).
-3. Runs `envelope_breakout_on_last_bar` with **20-period EMA** and bandwidth from **`env_trading_params.fno_envelope_decimal_per_side()`** (env `MOCK_AGENT_ENVELOPE_PCT`; default **0.25** = **25%** each side when unset). Tighter bands: e.g. `MOCK_AGENT_ENVELOPE_PCT=0.003`. Geometry matches `strategies._envelope_series` when the same decimal is passed as `pct`.
-4. **Trigger** (on the **latest** completed bar only): **first** key in the **scan list** that shows a fresh cross wins; state includes **`underlying`** (the index key).
-   - Close crosses **above** upper band → **BULLISH**, leg **CE**.
-   - Close crosses **below** lower band → **BEARISH**, leg **PE**.
+3. Runs `envelope_breakout_on_last_bar` with **20-period EMA** and bandwidth from **`env_trading_params.fno_envelope_decimal_per_side()`** (env `MOCK_AGENT_ENVELOPE_PCT`; default **0.25** = **25%** each side when unset). Tighter bands: e.g. `MOCK_AGENT_ENVELOPE_PCT=0.003`. Geometry matches `strategies._envelope_series` when the same decimal is passed as `pct`. The dataframe must pass a **warmup** bar count (`max(ema_period+2, 22)`; see [MOCK_ENGINE_BREAKOUT_RULES.md](MOCK_ENGINE_BREAKOUT_RULES.md)), and an optional **clear break** past the band is enforced when `MOCK_ENGINE_BREAKOUT_CLEAR_PCT` is non-zero (`env_trading_params.mock_engine_breakout_clear_pct()`).
+4. **Trigger** (on the **latest** completed bar only): **first** key in the **scan list** that shows a valid breakout wins; state includes **`underlying`** (the index key).
+   - Close crosses **above** upper band (and clear-break rules if configured) → **BULLISH**, leg **CE**.
+   - Close crosses **below** lower band (and clear-break rules if configured) → **BEARISH**, leg **PE**.
 5. If no key in the scan list produces a cross → state gets aggregated `signal_text` / `notes`; routing sends flow to **END** (no LLM).
 
 ### Node: `candidates`

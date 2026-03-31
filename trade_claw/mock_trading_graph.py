@@ -186,7 +186,8 @@ def build_mock_trading_graph(
         idx_label = FO_INDEX_UNDERLYING_LABELS.get(idx, idx)
         sys = SystemMessage(
             content=(
-                "You choose one **NSE index option** contract for a **long premium only** mock trade "
+                "You choose one **NSE F&O option** contract (index or single-stock underlying) for a "
+                "**long premium only** mock trade "
                 "(calls for bullish, puts for bearish — wrong type already removed in code). "
                 "Pick the best strike/expiry among the candidates using DTE, moneyness vs spot, and liquidity (LTP). "
                 "Do not invent stop or target prices; the system sets them from configuration after entry."
@@ -194,7 +195,7 @@ def build_mock_trading_graph(
         )
         human = HumanMessage(
             content=(
-                f"Index: {idx} ({idx_label}). Spot ~ {state.get('spot', 0):.2f}. "
+                f"Underlying: {idx} ({idx_label}). Spot ~ {state.get('spot', 0):.2f}. "
                 f"Direction: {state.get('direction')}. Leg: {state.get('leg')}.\n"
                 f"Candidates (JSON):\n{json.dumps(cands, indent=2)}"
             )

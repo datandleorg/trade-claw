@@ -45,13 +45,10 @@ def is_nfo_option(inst: dict) -> bool:
 
 
 # NFO instrument `name` (upper) for each index underlying key (see constants.FO_INDEX_UNDERLYING_KEYS).
-# NIFTYNXT50: Kite has used NIFTYJR and/or NIFTYNXT50 — accept both.
 _INDEX_NFO_NAMES: dict[str, frozenset[str]] = {
     "NIFTY": frozenset({"NIFTY"}),
     "BANKNIFTY": frozenset({"BANKNIFTY"}),
-    "FINNIFTY": frozenset({"FINNIFTY"}),
     "MIDCPNIFTY": frozenset({"MIDCPNIFTY"}),
-    "NIFTYNXT50": frozenset({"NIFTYJR", "NIFTYNXT50"}),
 }
 
 
@@ -291,41 +288,12 @@ def align_option_entry_bar(
 _INDEX_NSE_SPOT_CANDIDATES: dict[str, tuple[str, ...]] = {
     "NIFTY": ("NIFTY 50",),
     "BANKNIFTY": ("NIFTY BANK",),
-    "FINNIFTY": (
-        "NIFTY FIN SERVICE",
-        "NIFTY FIN SERV",
-        "NIFTY FINSERVICE",
-        "FINNIFTY",
-    ),
     "MIDCPNIFTY": ("NIFTY MIDCAP SELECT", "NIFTY MID SELECT"),
-    "NIFTYNXT50": ("NIFTY NEXT 50",),
 }
 
 
-def _nse_index_tradingsymbol_fallback(underlying: str, nse_instruments: list) -> str | None:
-    """
-    If exact tradingsymbol candidates miss, match Kite NSE index rows by segment/name.
-    FINNIFTY naming varies across Kite instrument dumps.
-    """
-    u = underlying.upper().strip()
-    if u == "FINNIFTY":
-        for i in nse_instruments:
-            if i.get("exchange") != "NSE":
-                continue
-            seg = str(i.get("segment") or "").upper()
-            if "INDICES" not in seg:
-                continue
-            nm = str(i.get("name") or "").upper()
-            ts = str(i.get("tradingsymbol") or "").strip()
-            if not ts:
-                continue
-            if ("FIN" in nm or "FIN" in ts.upper()) and (
-                "SERV" in nm
-                or "SERV" in ts.upper()
-                or "FINANCIAL" in nm
-                or "FINSERVICE" in nm.replace(" ", "")
-            ):
-                return ts
+def _nse_index_tradingsymbol_fallback(_underlying: str, _nse_instruments: list) -> str | None:
+    """If exact tradingsymbol candidates miss, match Kite NSE index rows by segment/name."""
     return None
 
 

@@ -8,6 +8,8 @@ from trade_claw.constants import FO_ENVELOPE_BANDWIDTH_MAX_PCT, FO_ENVELOPE_BAND
 
 _DEFAULT_MOCK_AGENT_ENVELOPE_DECIMAL = 0.25
 _DEFAULT_INTRADAY_ENVELOPE_DECIMAL = 0.0030
+# Min fractional distance past envelope band for mock signal (vs band price); 0 = touch OK.
+_DEFAULT_MOCK_ENGINE_BREAKOUT_CLEAR_PCT = 0.0002
 
 
 def fno_envelope_decimal_per_side() -> float:
@@ -116,3 +118,18 @@ def mock_engine_option_target_multiplier() -> float:
 def mock_engine_stop_loss_floor_multiplier() -> float:
     """Alias for :func:`mock_engine_option_stop_multiplier`."""
     return mock_engine_option_stop_multiplier()
+
+
+def mock_engine_breakout_clear_pct() -> float:
+    """
+    Mock envelope signal: require close to exceed the band by at least this fraction of band level
+    (e.g. 0.0002 = 0.02% above upper for bullish). ``0`` disables (fresh touch/cross only).
+    """
+    raw = (os.environ.get("MOCK_ENGINE_BREAKOUT_CLEAR_PCT") or "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            return float(max(0.0, min(0.05, v)))
+        except ValueError:
+            pass
+    return float(_DEFAULT_MOCK_ENGINE_BREAKOUT_CLEAR_PCT)

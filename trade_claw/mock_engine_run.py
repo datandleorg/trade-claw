@@ -41,6 +41,7 @@ def _graph_result_telemetry_payload(underlying_key: str, result: dict[str, Any])
         "underlying": underlying_key,
         "error": result.get("error"),
         "trade_id": result.get("trade_id"),
+        "notes": result.get("notes"),
         "signal_text": result.get("signal_text") or result.get("notes"),
         "direction": result.get("direction"),
         "leg": result.get("leg"),

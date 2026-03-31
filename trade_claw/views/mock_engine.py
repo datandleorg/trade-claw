@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import NamedTuple
 
@@ -214,28 +216,113 @@ def _session_date_today_ist() -> date:
     return now_ist().date()
 
 
-def _index_ltp(kite, underlying_key: str) -> float | None:
-    sym = nse_index_ltp_symbol(underlying_key)
-    if not sym:
-        return None
+def _nse_underlying_quote(kite, underlying_key: str) -> tuple[float | None, float | None]:
+    """Spot quote for index key or equity symbol (NSE cash)."""
+    sym = nse_index_ltp_symbol(underlying_key) or f"NSE:{underlying_key.upper().strip()}"
+    return _nse_symbol_quote(kite, sym)
+
+
+def _nse_symbol_quote(kite, nse_key: str) -> tuple[float | None, float | None]:
     try:
-        r = kite.ltp([sym]).get(sym) or {}
-        v = r.get("last_price")
-        return float(v) if v is not None else None
+        q = kite.quote([nse_key]).get(nse_key) or {}
+        lp = q.get("last_price")
+        ohlc = q.get("ohlc") if isinstance(q.get("ohlc"), dict) else {}
+        prev = ohlc.get("close")
+        lpf = float(lp) if lp is not None else None
+        prevf = float(prev) if prev is not None else None
+        if lpf is not None and prevf is not None:
+            return lpf, lpf - prevf
+        return lpf, None
     except Exception:  # noqa: BLE001
-        return None
+        return None, None
+
+
+def _safe_key_fragment(s: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]+", "_", s)[:48] or "x"
 
 
 def _opt_ltp(kite, tradingsymbol: str | None) -> float | None:
+    lp, _d = _opt_quote(kite, tradingsymbol)
+    return lp
+
+
+def _opt_quote(kite, tradingsymbol: str | None) -> tuple[float | None, float | None]:
+    """(last_price, day_change vs quote ohlc.close). Delta may be None."""
     if not tradingsymbol:
-        return None
+        return None, None
     try:
         k = f"NFO:{tradingsymbol}"
-        r = kite.ltp([k]).get(k) or {}
-        v = r.get("last_price")
-        return float(v) if v is not None else None
+        q = kite.quote([k]).get(k) or {}
+        lp = q.get("last_price")
+        ohlc = q.get("ohlc") if isinstance(q.get("ohlc"), dict) else {}
+        prev = ohlc.get("close")
+        lpf = float(lp) if lp is not None else None
+        prevf = float(prev) if prev is not None else None
+        if lpf is not None and prevf is not None:
+            return lpf, lpf - prevf
+        return lpf, None
     except Exception:  # noqa: BLE001
-        return None
+        return None, None
+
+
+def _render_last_graph_run_panel(run: dict | None, *, key_prefix: str) -> None:
+    """Worker telemetry + LLM inference for one underlying (from ``last_graph``)."""
+    if not run:
+        st.caption(
+            "No worker row for this scrip yet — start **worker + beat** and wait for a scan inside 09:15–15:19 IST."
+        )
+        return
+    if run.get("skipped"):
+        st.info(f"**Skipped:** {run.get('skipped')}")
+    if run.get("error"):
+        st.error(str(run["error"]))
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        st.markdown(f"**Direction** · {run.get('direction') or '—'}")
+        st.markdown(f"**Leg** · {run.get('leg') or '—'}")
+    with g2:
+        sp = run.get("spot")
+        st.markdown(
+            f"**Spot @ signal** · ₹{float(sp):,.2f}" if sp is not None else "**Spot** · —"
+        )
+    with g3:
+        st.markdown(f"**Trade id** · {run.get('trade_id') or '—'}")
+    sig_txt = run.get("signal_text")
+    notes_txt = run.get("notes")
+    if sig_txt:
+        st.text_area(
+            "Envelope / signal (worker)",
+            value=str(sig_txt),
+            height=120,
+            disabled=True,
+            key=f"mock_sig_txt_{key_prefix}",
+        )
+    if notes_txt and str(notes_txt).strip() != str(sig_txt or "").strip():
+        st.text_area(
+            "Additional graph notes",
+            value=str(notes_txt),
+            height=100,
+            disabled=True,
+            key=f"mock_notes_txt_{key_prefix}",
+        )
+    rat = run.get("llm_rationale")
+    if rat:
+        st.markdown("**LLM rationale**")
+        st.info(str(rat))
+    cands = run.get("candidates")
+    if cands:
+        st.markdown("**Candidates sent to LLM**")
+        st.dataframe(pd.DataFrame(cands), use_container_width=True, hide_index=True)
+    if run.get("llm_tradingsymbol"):
+        st.markdown("**LLM decision (structured)**")
+        st.json(
+            {
+                "tradingsymbol": run.get("llm_tradingsymbol"),
+                "stop_loss": run.get("stop_loss"),
+                "target": run.get("target"),
+                "rationale": run.get("llm_rationale"),
+            }
+        )
 
 
 def _opt_minute_df(kite, nfo_instruments: list, tradingsymbol: str | None, session_d: date):
@@ -486,16 +573,14 @@ def _render_mock_analytics() -> None:
 
 
 def render_mock_engine(kite):
-    st.title("Mock AI engine (index options)")
+    st.title("Mock AI engine (indices + Nifty 50)")
     st.caption(
-        "Celery Beat runs `scan_mock_market` **every minute** on the scheduler (IST weekdays, hours 9–15; "
-        "in-task guards narrow entries to ~09:15–15:19 and square-off from 15:20). The worker writes **telemetry** "
-        "and **trades** to SQLite. The **Live** tab **auto-refreshes every 10 seconds** (quotes/charts + DB read); "
-        "use **Refresh quotes & charts** for an immediate pull. Shows **every** index in `MOCK_ENGINE_UNDERLYINGS`. "
-        "**At most one OPEN mock trade per index** (several indices at once)."
+        "Celery Beat runs `scan_mock_market` **every minute** (IST weekdays, ~09:15–15:19 entries; 15:20 square-off). "
+        "Default underlyings: **3 indices + all Nifty 50 stocks** (override with `MOCK_ENGINE_UNDERLYINGS`). "
+        "Live tab **auto-refreshes every 10 seconds**. **At most one OPEN mock trade per underlying.**"
     )
     st.markdown(f"| DB path | `{MOCK_TRADES_DB_PATH}` |")
-    _br1, _br2 = st.columns([1, 3])
+    _br1, _br2, _br3 = st.columns([1, 1, 2])
     with _br1:
         if st.button(
             "Refresh quotes & charts",
@@ -503,6 +588,9 @@ def render_mock_engine(kite):
             help="Reload this page: latest Kite LTP, intraday charts, and SQLite telemetry/trades.",
         ):
             st.rerun()
+    with _br2:
+        if st.button("F&O Options", key="mock_nav_fo_page"):
+            st.switch_page("pages/F_Options.py")
 
     if st.session_state.nse_instruments is None:
         with st.spinner("Loading NSE instruments..."):
@@ -534,19 +622,20 @@ def render_mock_engine(kite):
 
         open_rows = mock_trade_store.list_open_trades()
         und = mock_engine_underlyings()
+        open_by_u: dict[str, list] = defaultdict(list)
+        for r in open_rows:
+            ux = (r.index_underlying or "").strip().upper()
+            if ux:
+                open_by_u[ux].append(r)
 
-        st.subheader("Live quotes & worker status")
+        st.subheader("Live summary")
         st.caption(
-            "Auto-refresh: **every 10 seconds** (Kite quotes + charts + SQLite). Worker `scan_mock_market` still runs **every minute** on Beat."
+            "Auto-refresh: **every 10 seconds** (Kite + SQLite). Worker **every minute** on Beat. "
+            f"**{len(und)}** scrips in scan list."
         )
-        idx_cols = st.columns(max(len(und), 1))
-        for i, u in enumerate(und):
-            with idx_cols[i]:
-                _lbl = FO_INDEX_UNDERLYING_LABELS.get(u, u)
-                _lv = _index_ltp(kite, u)
-                st.metric(f"{_lbl} LTP", f"₹{_lv:,.2f}" if _lv else "—")
 
-        live_opt = _opt_ltp(kite, open_rows[0].instrument if open_rows else None)
+        live_inst = open_rows[0].instrument if len(open_rows) == 1 else None
+        live_opt, live_d = _opt_quote(kite, live_inst)
         w1, w2, w3, w4 = st.columns(4)
         with w1:
             st.metric(
@@ -555,22 +644,64 @@ def render_mock_engine(kite):
                 help="One open position per index underlying at most",
             )
             if len(open_rows) == 1:
-                st.caption(
-                    f"Option LTP · ₹{live_opt:,.2f}" if live_opt is not None else "Option LTP · —"
-                )
+                if live_opt is not None:
+                    ep0 = float(open_rows[0].entry_price or 0)
+                    leg_delta = (live_opt - ep0) if ep0 else None
+                    if leg_delta is not None:
+                        st.metric(
+                            "Option LTP",
+                            f"₹{live_opt:,.2f}",
+                            delta=f"₹{leg_delta:+,.2f} vs entry",
+                            delta_color="normal",
+                        )
+                    elif live_d is not None:
+                        st.metric(
+                            "Option LTP",
+                            f"₹{live_opt:,.2f}",
+                            delta=f"₹{live_d:+,.2f} day",
+                            delta_color="normal",
+                        )
+                    else:
+                        st.metric("Option LTP", f"₹{live_opt:,.2f}")
+                else:
+                    st.caption("Option LTP · —")
             elif open_rows:
                 opt_rows = []
                 for t in open_rows:
-                    lp = _opt_ltp(kite, t.instrument)
+                    lp, _dd = _opt_quote(kite, t.instrument)
+                    ep = float(t.entry_price or 0)
+                    chg_e = (lp - ep) if lp is not None and ep else None
                     opt_rows.append(
                         {
                             "trade_id": t.trade_id,
                             "index": t.index_underlying or "—",
                             "instrument": t.instrument or "—",
                             "LTP": f"₹{lp:,.2f}" if lp is not None else "—",
+                            "vs_entry": chg_e,
                         }
                     )
-                st.dataframe(pd.DataFrame(opt_rows), use_container_width=True, hide_index=True)
+                df_leg = pd.DataFrame(opt_rows)
+
+                def _leg_chg_color(s: pd.Series) -> list[str]:
+                    out: list[str] = []
+                    for v in s:
+                        if v is None or (isinstance(v, float) and v != v):
+                            out.append("")
+                        elif v > 0:
+                            out.append("color: #22c55e")
+                        elif v < 0:
+                            out.append("color: #ef4444")
+                        else:
+                            out.append("")
+                    return out
+
+                sty_leg = (
+                    df_leg.style.format({"vs_entry": "₹{:+,.2f}"}, na_rep="—")
+                    .apply(_leg_chg_color, subset=["vs_entry"])
+                )
+                st.dataframe(sty_leg, use_container_width=True, hide_index=True)
+            if len(open_rows) > 8:
+                st.caption("Many open legs — details also appear under each scrip below.")
         with w2:
             st.metric(
                 "Last worker scan (IST ISO)",
@@ -585,107 +716,70 @@ def render_mock_engine(kite):
                 help="From MOCK_AGENT_ENVELOPE_PCT (trade_claw.env_trading_params.fno_envelope_decimal_per_side)",
             )
 
-        if open_rows:
-            st.subheader("Current mock positions")
-            for r in open_rows:
-                leg_ltp = _opt_ltp(kite, r.instrument)
-                u_pnl = None
-                if leg_ltp is not None and r.entry_price:
-                    u_pnl = (leg_ltp - float(r.entry_price)) * int(r.quantity or 1)
-                _ix = FO_INDEX_UNDERLYING_LABELS.get(
-                    (r.index_underlying or "").strip().upper(), r.index_underlying or "—"
-                )
-                st.markdown(
-                    f"**trade_id {r.trade_id}** · **{_ix}** · `{r.instrument or '—'}` · "
-                    f"**Direction** {r.direction or '—'}"
-                )
-                oc3, oc4, oc5, oc6 = st.columns(4)
-                with oc3:
-                    st.metric(
-                        f"Entry · id {r.trade_id}",
-                        f"₹{float(r.entry_price or 0):,.2f}",
-                    )
-                with oc4:
-                    st.metric(
-                        "Stop / Target",
-                        f"₹{float(r.stop_loss or 0):,.2f} / ₹{float(r.target or 0):,.2f}",
-                    )
-                with oc5:
-                    st.metric("Qty (units)", int(r.quantity or 0))
-                with oc6:
-                    st.metric(
-                        "Unrealised (indic.)",
-                        f"₹{u_pnl:,.2f}" if u_pnl is not None else "—",
-                    )
-                if r.llm_rationale:
-                    st.caption("LLM rationale at entry")
-                    st.write(r.llm_rationale)
-                st.divider()
-        else:
+        if not open_rows:
             st.info(
-                "No **OPEN** mock trades. The worker opens at most **one leg per index** when a breakout fires and that index is flat."
+                "No **OPEN** mock trades. The worker opens at most **one leg per underlying** when a breakout fires and that underlying is flat."
             )
 
-        st.subheader("Index spot — session candles + agent envelope (EMA20)")
-        _scan_list = ", ".join(FO_INDEX_UNDERLYING_LABELS.get(u, u) for u in und)
+        st.subheader("Scrips — two columns")
         st.caption(
-            f"**All** configured indices (worker scans in this order): {_scan_list}. "
-            f"Geometry: EMA **{ENVELOPE_EMA_PERIOD}** ± **{100 * env_pct:.3f}%** per side. "
-            "Very wide envelopes add a **lower panel**: same ± bands as % from EMA."
+            f"EMA **{ENVELOPE_EMA_PERIOD}** ± **{100 * env_pct:.3f}%** envelope on spot (1m). "
+            "Each cell: quote, spot chart, last worker/LLM telemetry, and any **open** position for that underlying."
         )
-        for u in und:
-            idx_label = FO_INDEX_UNDERLYING_LABELS.get(u, u)
-            st.markdown(f"##### {idx_label} (`{u}`)")
-            df_u, err_u = load_index_session_minute_df(kite, nse, session_d, u)
-            if df_u is not None and not df_u.empty and not err_u:
-                center, upper, lower = _envelope_series(
-                    df_u, ENVELOPE_EMA_PERIOD, env_pct
-                )
-                if len(df_u) >= ENVELOPE_EMA_PERIOD:
-                    ema_v = float(center.iloc[-1])
-                    up_v = float(upper.iloc[-1])
-                    lo_v = float(lower.iloc[-1])
-                    if ema_v == ema_v and up_v == up_v and lo_v == lo_v:
-                        m1, m2, m3 = st.columns(3)
-                        with m1:
-                            st.metric(
-                                f"EMA20 · {idx_label}",
-                                f"₹{ema_v:,.2f}",
-                            )
-                        with m2:
-                            st.metric(
-                                f"Upper (+{100 * env_pct:.1f}%)",
-                                f"₹{up_v:,.2f}",
-                            )
-                        with m3:
-                            st.metric(
-                                f"Lower (−{100 * env_pct:.1f}%)",
-                                f"₹{lo_v:,.2f}",
-                            )
-                fig_u, dual_panel = _mock_index_spot_figure(
-                    df_u, idx_label, env_pct, ema_period=ENVELOPE_EMA_PERIOD
-                )
-                fig_u.update_layout(
-                    title=f"{idx_label} (1m) + envelope",
-                    height=480 if dual_panel else 380,
-                )
-                st.plotly_chart(
-                    fig_u, use_container_width=True, key=f"mock_eng_spot_{u}"
-                )
-            else:
-                st.warning(
-                    f"{idx_label}: {err_u or 'No underlying candles for today (holiday, pre-open, or API).'}"
-                )
+        pu_map = last_graph.get("per_underlying") if isinstance(last_graph, dict) else None
+        runs_list = last_graph.get("runs") if isinstance(last_graph.get("runs"), list) else []
 
-        if open_rows:
-            st.subheader("Option premium (1m session)")
-            for r in open_rows:
-                if not r.instrument:
-                    continue
-                _ix_lab = FO_INDEX_UNDERLYING_LABELS.get(
-                    (r.index_underlying or "").strip().upper(), r.index_underlying or ""
+        def _resolve_run(under: str) -> dict | None:
+            uu = under.strip().upper()
+            if isinstance(pu_map, dict):
+                r0 = pu_map.get(uu) or pu_map.get(under)
+                if r0:
+                    return r0
+            for rr in runs_list:
+                if str(rr.get("underlying") or "").strip().upper() == uu:
+                    return rr
+            return None
+
+        def _render_open_trade_block(r, *, chart_key: str) -> None:
+            leg_ltp = _opt_ltp(kite, r.instrument)
+            u_pnl = None
+            if leg_ltp is not None and r.entry_price:
+                u_pnl = (leg_ltp - float(r.entry_price)) * int(r.quantity or 1)
+            st.markdown(
+                f"**trade_id {r.trade_id}** · `{r.instrument or '—'}` · **{r.direction or '—'}**"
+            )
+            oc3, oc4, oc5, oc6, oc7 = st.columns(5)
+            with oc3:
+                st.metric("Entry", f"₹{float(r.entry_price or 0):,.2f}")
+            with oc4:
+                st.metric(
+                    "Stop / Target",
+                    f"₹{float(r.stop_loss or 0):,.2f} / ₹{float(r.target or 0):,.2f}",
                 )
-                st.markdown(f"##### trade_id {r.trade_id} · {_ix_lab} · `{r.instrument}`")
+            with oc5:
+                st.metric("Qty", int(r.quantity or 0))
+            with oc6:
+                ep_r = float(r.entry_price or 0)
+                if leg_ltp is not None and ep_r:
+                    st.metric(
+                        "Option LTP",
+                        f"₹{leg_ltp:,.2f}",
+                        delta=f"₹{leg_ltp - ep_r:+,.2f} vs entry",
+                        delta_color="normal",
+                    )
+                elif leg_ltp is not None:
+                    st.metric("Option LTP", f"₹{leg_ltp:,.2f}")
+                else:
+                    st.metric("Option LTP", "—")
+            with oc7:
+                st.metric(
+                    "Unrealised",
+                    f"₹{u_pnl:,.2f}" if u_pnl is not None else "—",
+                )
+            if r.llm_rationale:
+                st.caption("LLM rationale at entry")
+                st.write(r.llm_rationale)
+            if r.instrument:
                 df_o = _opt_minute_df(kite, nfo, r.instrument, session_d)
                 if df_o is not None and not df_o.empty:
                     fig_o = go.Figure()
@@ -715,121 +809,115 @@ def render_mock_engine(kite):
                             y=sp, line_dash="dot", line_color="tomato", annotation_text="Stop"
                         )
                     fig_o.update_layout(
-                        title=f"{r.instrument} — premium",
-                        height=320,
+                        title=f"{r.instrument} — premium (1m)",
+                        height=260,
                         xaxis_rangeslider_visible=False,
                         template="plotly_dark",
                     )
-                    st.plotly_chart(
-                        fig_o, use_container_width=True, key=f"mock_eng_opt_{r.trade_id}"
-                    )
+                    st.plotly_chart(fig_o, use_container_width=True, key=chart_key)
                 else:
-                    st.caption(
-                        f"Could not load minute series for `{r.instrument}` (symbol/expiry or API)."
+                    st.caption(f"No minute series for `{r.instrument}`.")
+
+        for row_start in range(0, len(und), 2):
+            col_a, col_b = st.columns(2)
+            pair = und[row_start : row_start + 2]
+            for ci, u in enumerate(pair):
+                col = col_a if ci == 0 else col_b
+                kf = _safe_key_fragment(u)
+                with col:
+                    idx_label = FO_INDEX_UNDERLYING_LABELS.get(u, u)
+                    st.markdown(f"##### {idx_label} · `{u}`")
+                    _lv, _d = _nse_underlying_quote(kite, u)
+                    _fmt = f"₹{_lv:,.2f}" if _lv is not None else "—"
+                    if _d is not None:
+                        st.metric("Spot LTP", _fmt, delta=f"₹{_d:+,.2f}", delta_color="normal")
+                    else:
+                        st.metric("Spot LTP", _fmt)
+
+                    df_u, err_u = load_index_session_minute_df(kite, nse, session_d, u)
+                    if df_u is not None and not df_u.empty and not err_u:
+                        center, upper, lower = _envelope_series(
+                            df_u, ENVELOPE_EMA_PERIOD, env_pct
+                        )
+                        if len(df_u) >= ENVELOPE_EMA_PERIOD:
+                            ema_v = float(center.iloc[-1])
+                            up_v = float(upper.iloc[-1])
+                            lo_v = float(lower.iloc[-1])
+                            if ema_v == ema_v and up_v == up_v and lo_v == lo_v:
+                                spot_last = float(df_u["close"].iloc[-1])
+                                m1, m2, m3 = st.columns(3)
+                                with m1:
+                                    d_ema = spot_last - ema_v
+                                    st.metric(
+                                        "EMA20",
+                                        f"₹{ema_v:,.2f}",
+                                        delta=f"₹{d_ema:+,.2f}",
+                                        delta_color="normal",
+                                    )
+                                with m2:
+                                    d_u = spot_last - up_v
+                                    st.metric(
+                                        f"Upper +{100 * env_pct:.1f}%",
+                                        f"₹{up_v:,.2f}",
+                                        delta=f"₹{d_u:+,.2f}",
+                                        delta_color="normal",
+                                    )
+                                with m3:
+                                    d_l = spot_last - lo_v
+                                    st.metric(
+                                        f"Lower −{100 * env_pct:.1f}%",
+                                        f"₹{lo_v:,.2f}",
+                                        delta=f"₹{d_l:+,.2f}",
+                                        delta_color="normal",
+                                    )
+                        fig_u, dual_panel = _mock_index_spot_figure(
+                            df_u, idx_label, env_pct, ema_period=ENVELOPE_EMA_PERIOD
+                        )
+                        fig_u.update_layout(
+                            title=f"{u} spot (1m)",
+                            height=340 if dual_panel else 280,
+                        )
+                        st.plotly_chart(
+                            fig_u,
+                            use_container_width=True,
+                            key=f"mock_eng_spot_{kf}_{row_start}_{ci}",
+                        )
+                    else:
+                        st.warning(
+                            f"{idx_label}: {err_u or 'No spot candles today.'}"
+                        )
+
+                    st.markdown("**Worker / LLM (last tick)**")
+                    run_u = _resolve_run(u)
+                    _render_last_graph_run_panel(
+                        run_u, key_prefix=f"sg_{kf}_{row_start}_{ci}"
                     )
 
-        st.subheader("Last agent graph snapshot (from worker)")
-        if not last_graph:
-            st.caption("No graph telemetry yet — start **worker + beat** and wait for a scan inside 09:15–15:19 IST.")
-        elif isinstance(last_graph.get("runs"), list):
-            st.caption(
-                f"Per-index results from last tick (IST **{last_graph.get('tick_ist', '')[:19]}**). "
-                "`skipped: open_position` means that index already had an OPEN leg."
-            )
-            if not last_graph["runs"]:
-                st.caption("No graph runs recorded for that tick.")
-            for i, run in enumerate(last_graph["runs"]):
-                ukey = run.get("underlying") or f"run_{i}"
-                title = FO_INDEX_UNDERLYING_LABELS.get(str(ukey).strip().upper(), ukey)
-                with st.expander(f"{title} (`{ukey}`)", expanded=False):
-                    if run.get("skipped"):
-                        st.info(f"**Skipped:** {run.get('skipped')}")
-                    if run.get("error"):
-                        st.error(str(run["error"]))
-                    g1, g2, g3 = st.columns(3)
-                    with g1:
-                        st.markdown(f"**Direction** · {run.get('direction') or '—'}")
-                        st.markdown(f"**Leg** · {run.get('leg') or '—'}")
-                    with g2:
-                        sp = run.get("spot")
-                        st.markdown(
-                            f"**Spot @ signal** · ₹{float(sp):,.2f}"
-                            if sp is not None
-                            else "**Spot** · —"
-                        )
-                    with g3:
-                        st.markdown(f"**Trade id** · {run.get('trade_id') or '—'}")
-                    sig_txt = run.get("signal_text") or run.get("notes")
-                    if sig_txt:
-                        st.text_area(
-                            "Signal / notes",
-                            value=str(sig_txt),
-                            height=80,
-                            disabled=True,
-                            key=f"mock_sig_txt_{ukey}_{i}",
-                        )
-                    cands = run.get("candidates")
-                    if cands:
-                        st.markdown("**Top candidates seen by LLM**")
-                        st.dataframe(pd.DataFrame(cands), use_container_width=True, hide_index=True)
-                    if run.get("llm_tradingsymbol"):
-                        st.markdown("**LLM pick**")
-                        st.json(
-                            {
-                                "tradingsymbol": run.get("llm_tradingsymbol"),
-                                "stop_loss": run.get("stop_loss"),
-                                "target": run.get("target"),
-                                "rationale": run.get("llm_rationale"),
-                            }
-                        )
-        else:
-            g1, g2, g3 = st.columns(3)
-            with g1:
-                st.markdown(f"**Direction** · {last_graph.get('direction') or '—'}")
-                st.markdown(f"**Leg** · {last_graph.get('leg') or '—'}")
-            with g2:
-                sp = last_graph.get("spot")
-                st.markdown(f"**Spot @ signal** · ₹{float(sp):,.2f}" if sp is not None else "**Spot** · —")
-            with g3:
-                st.markdown(f"**Trade id** · {last_graph.get('trade_id') or '—'}")
-                if last_graph.get("error"):
-                    st.error(last_graph["error"])
-            if last_graph.get("signal_text") or last_graph.get("notes"):
-                st.text_area(
-                    "Signal / notes",
-                    value=str(last_graph.get("signal_text") or last_graph.get("notes") or ""),
-                    height=100,
-                    disabled=True,
-                    key="mock_sig_txt",
-                )
-            cands = last_graph.get("candidates")
-            if cands:
-                st.markdown("**Top candidates seen by LLM**")
-                st.dataframe(pd.DataFrame(cands), use_container_width=True, hide_index=True)
-            if last_graph.get("llm_tradingsymbol"):
-                st.markdown("**LLM pick**")
-                st.json(
-                    {
-                        "tradingsymbol": last_graph.get("llm_tradingsymbol"),
-                        "stop_loss": last_graph.get("stop_loss"),
-                        "target": last_graph.get("target"),
-                        "rationale": last_graph.get("llm_rationale"),
-                    }
-                )
+                    pos_here = open_by_u.get(u, [])
+                    if pos_here:
+                        st.markdown("**Open mock trade(s)**")
+                        for pi, r in enumerate(pos_here):
+                            _render_open_trade_block(
+                                r,
+                                chart_key=f"mock_eng_opt_{kf}_{row_start}_{ci}_{pi}_{r.trade_id}",
+                            )
+                            if pi < len(pos_here) - 1:
+                                st.divider()
+
+        if last_graph and not isinstance(last_graph.get("runs"), list):
+            st.subheader("Last agent snapshot (legacy format)")
+            _render_last_graph_run_panel(dict(last_graph), key_prefix="legacy_fmt")
 
         st.subheader("Scan side-effects (last tick)")
-        ex1, ex2 = st.columns(2)
-        with ex1:
-            st.write(
-                f"Exits on target/stop: **{last_scan.get('exits_sl_target', 0)}** · "
-                f"15:20 square-off closes: **{last_scan.get('exits_square_off', 0)}**"
+        st.write(
+            f"Exits on target/stop: **{last_scan.get('exits_sl_target', 0)}** · "
+            f"15:20 square-off closes: **{last_scan.get('exits_square_off', 0)}**"
+        )
+        if isinstance(last_graph.get("runs"), list) and last_graph.get("tick_ist"):
+            st.caption(
+                f"Last graph tick (IST): **{str(last_graph.get('tick_ist', ''))[:19]}** · "
+                "`skipped: open_position` means that index already had an OPEN leg."
             )
-        with ex2:
-            if last_scan.get("graph"):
-                st.json(last_scan["graph"])
-
-        with st.expander("Raw `last_scan` (worker)", expanded=False):
-            st.json(last_scan)
 
         st.subheader("Mock trade book")
         rows = mock_trade_store.list_recent_trades(limit=100)
@@ -838,6 +926,12 @@ def render_mock_engine(kite):
         else:
             data = []
             for r in rows:
+                try:
+                    pnl_f = float(r.realized_pnl) if r.realized_pnl is not None else None
+                except (TypeError, ValueError):
+                    pnl_f = None
+                if pnl_f is not None and pnl_f != pnl_f:
+                    pnl_f = None
                 data.append(
                     {
                         "trade_id": r.trade_id,
@@ -851,11 +945,32 @@ def render_mock_engine(kite):
                         "target": r.target,
                         "status": r.status,
                         "exit": r.exit_price,
-                        "PnL": r.realized_pnl,
+                        "PnL": pnl_f,
                         "qty": r.quantity,
                     }
                 )
-            st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+            df_book = pd.DataFrame(data)
+
+            def _pnl_color(s: pd.Series) -> list[str]:
+                out: list[str] = []
+                for v in s:
+                    if v is None or (isinstance(v, float) and v != v):
+                        out.append("")
+                    elif v > 0:
+                        out.append("color: #22c55e")
+                    elif v < 0:
+                        out.append("color: #ef4444")
+                    else:
+                        out.append("")
+                return out
+
+            st.dataframe(
+                df_book.style.format({"PnL": "₹{:,.2f}"}, na_rep="—").apply(
+                    _pnl_color, subset=["PnL"]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         chart_rows = mock_trade_store.trades_for_chart()
         if chart_rows:

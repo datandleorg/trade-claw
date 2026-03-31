@@ -12,14 +12,11 @@ NFO_EXCHANGE = "NFO"
 
 # F&O mock target/stop defaults: use trade_claw.env_trading_params (MOCK_ENGINE_* / FO_OPTION_* at call time).
 # NSE index F&O underlyings (keys must match Kite NFO `name` / resolver in fo_support)
-FO_INDEX_UNDERLYING_KEYS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"]
-# Human labels for UI (NIFTYNXT50 = Nifty Next 50; NFO may list as NIFTYJR or NIFTYNXT50)
+FO_INDEX_UNDERLYING_KEYS = ["NIFTY", "BANKNIFTY", "MIDCPNIFTY"]
 FO_INDEX_UNDERLYING_LABELS = {
     "NIFTY": "NIFTY 50",
     "BANKNIFTY": "BANK NIFTY",
-    "FINNIFTY": "FINNIFTY (Nifty Financial Services)",
     "MIDCPNIFTY": "MIDCP NIFTY (Nifty Midcap Select)",
-    "NIFTYNXT50": "NIFTY NEXT 50",
 }
 FO_DEFAULT_UNDERLYINGS = list(FO_INDEX_UNDERLYING_KEYS)
 # Summary metrics: Target or Stop = realised; EOD = held to close

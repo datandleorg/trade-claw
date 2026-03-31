@@ -8,12 +8,13 @@ import random
 from datetime import date, datetime, time as dtime
 from zoneinfo import ZoneInfo
 
-from trade_claw.constants import ENVELOPE_EMA_PERIOD, FO_INDEX_UNDERLYING_KEYS
+from trade_claw.constants import ENVELOPE_EMA_PERIOD, FO_INDEX_UNDERLYING_KEYS, NIFTY50_SYMBOLS
 from trade_claw.env_trading_params import (
     fo_options_default_envelope_bandwidth_pct,
     fo_options_default_option_stop_loss_pct_ui,
     fo_options_default_option_target_pct_ui,
     fno_envelope_decimal_per_side,
+    mock_engine_breakout_clear_pct,
     mock_engine_option_stop_multiplier,
     mock_engine_option_target_multiplier,
     mock_engine_stop_loss_floor_multiplier,
@@ -25,6 +26,9 @@ from trade_claw.strategies import _envelope_series
 
 IST = ZoneInfo("Asia/Kolkata")
 logger = logging.getLogger(__name__)
+
+# Session bar count before mock engine may emit an envelope signal (with EMA(20), max(20+2, 22) == 22).
+MOCK_ENGINE_MIN_WARMUP_BARS = 22
 
 
 def mock_agent_envelope_pct() -> float:
@@ -86,16 +90,33 @@ def session_date_ist(dt: datetime) -> date:
     return dt.date()
 
 
+def mock_engine_allowed_underlyings() -> frozenset[str]:
+    """Symbols the mock engine may trade: index keys + Nifty 50 equity symbols."""
+    return frozenset(FO_INDEX_UNDERLYING_KEYS) | frozenset(NIFTY50_SYMBOLS)
+
+
+def mock_engine_default_underlyings() -> list[str]:
+    """Default scan order: three indices first, then Nifty 50 (no duplicates)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in list(FO_INDEX_UNDERLYING_KEYS) + list(NIFTY50_SYMBOLS):
+        ux = u.upper().strip()
+        if ux not in seen:
+            seen.add(ux)
+            out.append(ux)
+    return out
+
+
 def mock_engine_underlyings() -> list[str]:
     """
-    Index keys scanned each graph run (envelope on spot 1m), in order.
-    Env ``MOCK_ENGINE_UNDERLYINGS`` = comma-separated subset of ``FO_INDEX_UNDERLYING_KEYS``;
-    default = all five indices.
+    Keys scanned each graph run (envelope on spot 1m), in order.
+    Env ``MOCK_ENGINE_UNDERLYINGS`` = comma-separated subset of index keys and/or Nifty 50 symbols.
+    Default = indices (``FO_INDEX_UNDERLYING_KEYS``) then all ``NIFTY50_SYMBOLS``.
     """
-    allowed = frozenset(FO_INDEX_UNDERLYING_KEYS)
+    allowed = mock_engine_allowed_underlyings()
     raw = (os.environ.get("MOCK_ENGINE_UNDERLYINGS") or "").strip()
     if not raw:
-        return list(FO_INDEX_UNDERLYING_KEYS)
+        return mock_engine_default_underlyings()
     out: list[str] = []
     for part in raw.split(","):
         p = part.upper().strip()
@@ -103,7 +124,7 @@ def mock_engine_underlyings() -> list[str]:
             out.append(p)
         elif p:
             logger.warning("MOCK_ENGINE_UNDERLYINGS: unknown key %r ignored", p)
-    return out if out else list(FO_INDEX_UNDERLYING_KEYS)
+    return out if out else mock_engine_default_underlyings()
 
 
 def nse_index_ltp_symbol(underlying_key: str) -> str | None:
@@ -120,6 +141,9 @@ def envelope_breakout_on_last_bar(
 ) -> tuple[bool, str, dict]:
     """
     True if the **most recent** bar completes an envelope cross (same geometry as `_ma_envelope_analysis`).
+    Requires **warmup**: at least ``max(ema_period + 2, MOCK_ENGINE_MIN_WARMUP_BARS)`` session bars.
+    Optional **clear break**: close must exceed the band by ``mock_engine_breakout_clear_pct`` of band level
+    (env ``MOCK_ENGINE_BREAKOUT_CLEAR_PCT``; ``0`` = touch/cross only).
     BUY cross → BULLISH (long CE); SELL cross → BEARISH (long PE).
     """
     empty: dict = {
@@ -128,9 +152,14 @@ def envelope_breakout_on_last_bar(
         "spot": None,
         "signal_bar_time": None,
     }
-    min_bars = ema_period + 2
+    min_bars = max(ema_period + 2, MOCK_ENGINE_MIN_WARMUP_BARS)
     if df is None or len(df) < min_bars:
-        return False, f"Need at least {min_bars} bars; got {0 if df is None else len(df)}.", empty
+        return (
+            False,
+            f"Warmup: need at least {min_bars} session bars (EMA {ema_period} + envelope cross); "
+            f"got {0 if df is None else len(df)}.",
+            empty,
+        )
 
     close = df["close"]
     center, upper, lower = _envelope_series(df, ema_period, pct)
@@ -156,6 +185,29 @@ def envelope_breakout_on_last_bar(
             f"Close ₹{c:,.2f}, upper ₹{u:,.2f}, lower ₹{lo:,.2f}."
         )
         return False, text, empty
+
+    clear_eps = mock_engine_breakout_clear_pct()
+    if clear_eps > 0:
+        if direction == "BULLISH":
+            u_den = max(abs(u), 1e-12)
+            margin = (c - u) / u_den
+            if margin < clear_eps:
+                text = (
+                    f"EMA({ema_period}) ±{100 * pct:.2f}%: cross above upper but not a clear break "
+                    f"(need margin ≥ {100 * clear_eps:.4f}% of upper; got {100 * margin:.4f}%). "
+                    f"Close ₹{c:,.2f}, upper ₹{u:,.2f}."
+                )
+                return False, text, empty
+        else:
+            lo_den = max(abs(lo), 1e-12)
+            margin = (lo - c) / lo_den
+            if margin < clear_eps:
+                text = (
+                    f"EMA({ema_period}) ±{100 * pct:.2f}%: cross below lower but not a clear break "
+                    f"(need margin ≥ {100 * clear_eps:.4f}% of lower; got {100 * margin:.4f}%). "
+                    f"Close ₹{c:,.2f}, lower ₹{lo:,.2f}."
+                )
+                return False, text, empty
 
     ts = df.iloc[i]["date"]
     try:
