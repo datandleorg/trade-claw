@@ -9,22 +9,26 @@ For the full engine pipeline, see [MOCK_ENGINE.md](MOCK_ENGINE.md).
 ## Session data
 
 - Bars are loaded for the **session calendar day** from **09:15 to 15:30** IST (`load_index_session_minute_df` → `fetch_underlying_intraday`, interval `minute`).
-- The **signal is evaluated only on the latest completed bar** in that series (same bar the worker sees when the Celery tick runs).
+- The **breakout bar** is either the **latest** row (default) or the **penultimate** row when two-bar confirmation is enabled (`MOCK_ENGINE_BREAKOUT_REQUIRE_CONFIRM_BAR=1`). **Spot** and **signal_bar_time** in the emitted signal use the **latest** bar when confirmation is on, otherwise the same bar as the breakout.
 
 ---
 
-## 1. Warmup — at least 22 session bars
+## 1. Warmup — bar count
 
 Before any breakout logic runs, the dataframe must contain at least:
 
 ```text
-max(ENVELOPE_EMA_PERIOD + 2, MOCK_ENGINE_MIN_WARMUP_BARS)
+max(
+  ENVELOPE_EMA_PERIOD + 2 + (1 if confirm_bar else 0),
+  MOCK_ENGINE_MIN_WARMUP_BARS + (1 if confirm_bar else 0),
+  RANGE_EXPAND_LOOKBACK + 1 + (1 if confirm_bar else 0)   if RANGE_EXPAND_LOOKBACK > 0 else 0,
+  VOLUME_LOOKBACK + 1 + (1 if confirm_bar else 0)         if VOLUME_LOOKBACK > 0 else 0,
+)
 ```
 
-With the default **EMA period 20** (`ENVELOPE_EMA_PERIOD` in `trade_claw.constants`) and **`MOCK_ENGINE_MIN_WARMUP_BARS = 22`** in `mock_market_signal.py`, this is **22 bars**.
+(Implementation: `trade_claw.mock_market_signal.envelope_breakout_on_last_bar` — confirm bar adds **+1** because the breakout is evaluated one bar before the last row.)
 
-- **EMA + 2**: the envelope uses a 20-period EMA; a **fresh** cross is defined using the **last two** closes vs the bands, so at least **22** rows are required for stable geometry.
-- **Explicit 22-bar floor**: if `ENVELOPE_EMA_PERIOD` were increased later, `ema_period + 2` could exceed 22; the `max(...)` keeps both **EMA validity** and a **minimum 22-bar session warmup**.
+With default **EMA period 20**, **`MOCK_ENGINE_MIN_WARMUP_BARS = 22`**, and strict filters **off**, this stays **22 bars** (or **23** with `MOCK_ENGINE_BREAKOUT_REQUIRE_CONFIRM_BAR=1`).
 
 If there are fewer bars (early session, holiday, or thin data), the function returns **no signal** with a message that mentions warmup.
 
@@ -32,12 +36,12 @@ There is **no** separate wall-clock cutoff (e.g. 09:40); **only** the bar count 
 
 ---
 
-## 2. Fresh cross on the latest bar
+## 2. Fresh cross on the breakout bar
 
-On the **last** row of the dataframe:
+On the breakout row index `i_b` (`len-1` by default, or `len-2` when confirm mode is on):
 
-- **Bullish (long CE)**: previous close was at or below the **previous** upper band, and **current** close is **above** the **current** upper band.
-- **Bearish (long PE)**: previous close was at or above the **previous** lower band, and **current** close is **below** the **current** lower band.
+- **Bullish (long CE)**: previous close was at or below the **previous** upper band, and **breakout** close is **above** the **current** upper band.
+- **Bearish (long PE)**: previous close was at or above the **previous** lower band, and **breakout** close is **below** the **current** lower band.
 
 Otherwise there is **no** signal (no “stale” breakout — only the bar that **completes** the cross counts).
 
@@ -60,13 +64,30 @@ If the cross is present but the margin is too small, the function returns **no s
 
 ---
 
+## 4. Strict “clean breakout” filters (optional)
+
+All of the following are applied **after** the cross and optional clear-break check. Each knob is **disabled** when unset or set to **`0`** (readers in `trade_claw.env_trading_params`).
+
+| Env | Meaning |
+| :--- | :--- |
+| `MOCK_ENGINE_BREAKOUT_MIN_BODY_FRAC` | Minimum `\|close−open\| / (high−low)` on the breakout bar (0–1). **`0`** = off. |
+| `MOCK_ENGINE_BREAKOUT_MAX_LOWER_WICK_FRAC` | Max lower wick / range: `(min(open,close)−low)/(high−low)`. **`0`** = skip this check. |
+| `MOCK_ENGINE_BREAKOUT_MAX_UPPER_WICK_FRAC` | Max upper wick / range. **`0`** = skip. |
+| `MOCK_ENGINE_BREAKOUT_RANGE_EXPAND_LOOKBACK` | Integer `N`: require breakout range **>** mean range of the prior `N` bars. **`0`** = off. |
+| `MOCK_ENGINE_BREAKOUT_VOLUME_LOOKBACK` | Integer `M`: require breakout volume **>** mean volume of the prior `M` bars. **`0`** = off. If **all** volumes in the lookback window (including the breakout bar) are **zero** (typical index feeds), the volume rule is **skipped**. |
+| `MOCK_ENGINE_BREAKOUT_REQUIRE_DIRECTIONAL_BODY` | If `1` / `true`: bull requires `close > open`, bear requires `close < open`. |
+| `MOCK_ENGINE_BREAKOUT_REQUIRE_CONFIRM_BAR` | If `1` / `true`: breakout on bar `len−2`, **confirmation** on bar `len−1` (close still outside the band and structure held vs the breakout bar). **Spot** and **signal_bar_time** come from the **confirm** bar. |
+
+---
+
 ## Summary
 
 | Rule | Purpose |
 | :--- | :--- |
-| ≥ `max(ema_period+2, 22)` bars | Warmup + valid EMA envelope on full session series |
-| Fresh cross on **last** bar only | No signal on old breaks unless the latest bar confirms a new cross |
+| Warmup bar count | EMA envelope validity + optional confirm / range / volume history |
+| Fresh cross on breakout bar | No signal on old breaks unless that bar completes a new cross |
 | Clear break (unless pct = 0) | Reduce noise from marginal pierces of the band |
+| Strict filters (optional) | Body, wicks, range expansion, volume, directional body, 2-bar confirm |
 
 ---
 

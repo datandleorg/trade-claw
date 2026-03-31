@@ -15,6 +15,14 @@ from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
 from trade_claw.constants import ENVELOPE_EMA_PERIOD, FO_INDEX_UNDERLYING_LABELS
+from trade_claw.env_trading_params import (
+    mock_llm_risk_instruction,
+    mock_llm_sltp_fallback_to_env,
+    mock_llm_sltp_stop_pct_bounds,
+    mock_llm_sltp_target_pct_bounds,
+    option_stop_premium_fraction,
+    option_target_premium_fraction,
+)
 from trade_claw.fo_support import _to_date
 from trade_claw.mock_market_signal import (
     envelope_breakout_on_last_bar,
@@ -28,6 +36,68 @@ from trade_claw.mock_market_signal import (
 )
 from trade_claw import mock_trade_store
 from trade_claw.mock_engine_log import scan_info, scan_warning
+
+
+def _resolve_entry_sltp(
+    entry: float,
+    llm_stop: float | None,
+    llm_target: float | None,
+) -> tuple[float, float, str | None]:
+    """
+    Validate LLM stop/target vs ``entry`` and env percent bands.
+    Returns (stop_loss, target, error). On error, caller skips insert unless handled.
+    """
+    tgt_lo_p, tgt_hi_p = mock_llm_sltp_target_pct_bounds()
+    st_lo_p, st_hi_p = mock_llm_sltp_stop_pct_bounds()
+    tgt_min = entry * (1 + tgt_lo_p)
+    tgt_max = entry * (1 + tgt_hi_p)
+    st_floor = entry * (1 - st_hi_p)
+    st_ceil = entry * (1 - st_lo_p)
+
+    def from_env() -> tuple[float, float]:
+        return (
+            round(entry * mock_engine_option_stop_multiplier(), 2),
+            round(entry * mock_engine_option_target_multiplier(), 2),
+        )
+
+    if llm_stop is None or llm_target is None:
+        if mock_llm_sltp_fallback_to_env():
+            s, t = from_env()
+            return s, t, None
+        return 0.0, 0.0, "LLM must return stop_loss and target (option premium ₹)"
+
+    stop = round(float(llm_stop), 2)
+    target = round(float(llm_target), 2)
+
+    ok = (
+        stop > 0
+        and stop < entry
+        and target > entry
+        and st_floor <= stop <= st_ceil
+        and tgt_min <= target <= tgt_max
+    )
+    if ok:
+        return stop, target, None
+    if mock_llm_sltp_fallback_to_env():
+        scan_warning(
+            "graph_err",
+            "EXECUTE LLM SL/TP invalid entry=%.2f stop=%.2f target=%.2f (bands stop [%.2f,%.2f] target [%.2f,%.2f]) → env multipliers",
+            entry,
+            stop,
+            target,
+            st_floor,
+            st_ceil,
+            tgt_min,
+            tgt_max,
+        )
+        s, t = from_env()
+        return s, t, None
+    return (
+        0.0,
+        0.0,
+        f"Invalid LLM stop/target for entry ₹{entry:.2f}: need ₹{st_floor:.2f}≤stop≤₹{st_ceil:.2f}, "
+        f"₹{tgt_min:.2f}≤target≤₹{tgt_max:.2f} (or set MOCK_LLM_SLTP_FALLBACK=1)",
+    )
 from trade_claw.mock_trade_snapshot import (
     fetch_index_minute_bars_json,
     fetch_option_minute_bars_json,
@@ -37,7 +107,9 @@ from trade_claw.mock_trade_snapshot import (
 
 class LLMPick(BaseModel):
     tradingsymbol: str = Field(description="Must be exactly one tradingsymbol from the candidate list")
-    rationale: str = Field(description="Short rationale for strike choice (stop/target come from env, not the model)")
+    rationale: str = Field(description="Short rationale for strike and risk levels")
+    stop_loss: float = Field(description="Stop loss for the chosen option, premium in INR (must be below synthetic entry)")
+    target: float = Field(description="Take-profit for the chosen option, premium in INR (must be above synthetic entry)")
 
 
 class TradingState(TypedDict, total=False):
@@ -52,6 +124,8 @@ class TradingState(TypedDict, total=False):
     signal_text: str
     candidates: list[dict[str, Any]]
     llm_tradingsymbol: str
+    llm_stop_loss: float
+    llm_target: float
     stop_loss: float
     target: float
     llm_rationale: str
@@ -75,7 +149,7 @@ def build_mock_trading_graph(
     checkpointer: Any | None,
 ) -> CompiledStateGraph:
     key, model = _openai_creds()
-    llm = ChatOpenAI(api_key=key, model=model, temperature=0.2, max_completion_tokens=800)
+    llm = ChatOpenAI(api_key=key, model=model, temperature=0.2, max_completion_tokens=1200)
     structured = llm.with_structured_output(LLMPick)
     envelope_pct = mock_agent_envelope_pct()
 
@@ -184,13 +258,30 @@ def build_mock_trading_graph(
         allowed = {c["tradingsymbol"] for c in cands if c.get("tradingsymbol")}
         idx = (state.get("underlying") or "NIFTY").strip().upper()
         idx_label = FO_INDEX_UNDERLYING_LABELS.get(idx, idx)
+        tgt_lo_p, tgt_hi_p = mock_llm_sltp_target_pct_bounds()
+        st_lo_p, st_hi_p = mock_llm_sltp_stop_pct_bounds()
+        sug_tgt = option_target_premium_fraction()
+        sug_stp = option_stop_premium_fraction()
+        risk_extra = mock_llm_risk_instruction()
+        risk_block = f"\n\nAdditional risk guidance from operator:\n{risk_extra}" if risk_extra else ""
         sys = SystemMessage(
             content=(
                 "You choose one **NSE F&O option** contract (index or single-stock underlying) for a "
                 "**long premium only** mock trade "
                 "(calls for bullish, puts for bearish — wrong type already removed in code). "
                 "Pick the best strike/expiry among the candidates using DTE, moneyness vs spot, and liquidity (LTP). "
-                "Do not invent stop or target prices; the system sets them from configuration after entry."
+                "You must also output **stop_loss** and **target** as option **premium prices in Indian rupees (₹)** "
+                "for the **same contract** you pick (the chosen row's LTP is your reference). "
+                "Synthetic long entry will be approximately **LTP minus ~0.5–1.0 ₹ slippage** — "
+                "your stop_loss must be **strictly below** that entry and target **strictly above** it: "
+                "stop_loss < entry < target. "
+                f"Suggested distance from entry: target about +{100 * sug_tgt:.1f}% above entry, "
+                f"stop about −{100 * sug_stp:.1f}% below entry (guidance only). "
+                f"Hard bounds (validated in code): target between +{100 * tgt_lo_p:.1f}% and +{100 * tgt_hi_p:.1f}% "
+                f"above entry; stop between −{100 * st_hi_p:.1f}% and −{100 * st_lo_p:.1f}% below entry "
+                f"(i.e. stop premium in that band below entry). "
+                "Use two decimal places mentally; output numeric rupee levels."
+                f"{risk_block}"
             )
         )
         human = HumanMessage(
@@ -215,13 +306,17 @@ def build_mock_trading_graph(
             return {"error": f"LLM picked unknown symbol {pick.tradingsymbol!r}"}
         scan_info(
             "llm_pick",
-            "LLM_PICK underlying=%s symbol=%s",
+            "LLM_PICK underlying=%s symbol=%s stop=%.2f target=%.2f",
             idx,
             pick.tradingsymbol,
+            float(pick.stop_loss),
+            float(pick.target),
         )
         return {
             "llm_tradingsymbol": pick.tradingsymbol,
             "llm_rationale": pick.rationale.strip(),
+            "llm_stop_loss": float(pick.stop_loss),
+            "llm_target": float(pick.target),
         }
 
     def execute_node(state: TradingState) -> TradingState:
@@ -248,8 +343,14 @@ def build_mock_trading_graph(
             return {"error": "No LTP for execution"}
         slip = mock_agent_slippage_points()
         entry = max(0.01, ltp - slip)
-        stop_loss = round(entry * mock_engine_option_stop_multiplier(), 2)
-        target = round(entry * mock_engine_option_target_multiplier(), 2)
+        stop_loss, target, sltp_err = _resolve_entry_sltp(
+            entry,
+            state.get("llm_stop_loss"),
+            state.get("llm_target"),
+        )
+        if sltp_err:
+            scan_warning("graph_err", "EXECUTE SL/TP %s", sltp_err)
+            return {"error": sltp_err}
         qty_units = lot_size  # mock: always 1 exchange lot (PnL uses units = lot_size)
         idx = (state.get("underlying") or "NIFTY").strip().upper()
         try:

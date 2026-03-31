@@ -133,3 +133,123 @@ def mock_engine_breakout_clear_pct() -> float:
         except ValueError:
             pass
     return float(_DEFAULT_MOCK_ENGINE_BREAKOUT_CLEAR_PCT)
+
+
+def _env_int(name: str, default: int = 0) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# --- Strict clean breakout (0 / unset = disabled unless noted) ---
+
+
+def mock_engine_breakout_min_body_frac() -> float:
+    """Min |close-open| / (high-low) on breakout bar; ``0`` = disabled."""
+    v = _env_float("MOCK_ENGINE_BREAKOUT_MIN_BODY_FRAC", 0.0)
+    return float(max(0.0, min(1.0, v)))
+
+
+def mock_engine_breakout_max_lower_wick_frac() -> float:
+    """Max (min(open,close)-low) / range on breakout bar; ``0`` = skip check."""
+    v = _env_float("MOCK_ENGINE_BREAKOUT_MAX_LOWER_WICK_FRAC", 0.0)
+    return float(max(0.0, min(1.0, v)))
+
+
+def mock_engine_breakout_max_upper_wick_frac() -> float:
+    """Max (high-max(open,close)) / range; ``0`` = skip check."""
+    v = _env_float("MOCK_ENGINE_BREAKOUT_MAX_UPPER_WICK_FRAC", 0.0)
+    return float(max(0.0, min(1.0, v)))
+
+
+def mock_engine_breakout_range_expand_lookback() -> int:
+    """Require range[i_b] > mean(range of prior N bars); ``0`` = off."""
+    return max(0, _env_int("MOCK_ENGINE_BREAKOUT_RANGE_EXPAND_LOOKBACK", 0))
+
+
+def mock_engine_breakout_volume_lookback() -> int:
+    """Require volume[i_b] > mean(prior M); ``0`` = off. Skip if all vol zero."""
+    return max(0, _env_int("MOCK_ENGINE_BREAKOUT_VOLUME_LOOKBACK", 0))
+
+
+def mock_engine_breakout_require_directional_body() -> bool:
+    """Bull requires close > open; bear requires close < open."""
+    return _env_truthy("MOCK_ENGINE_BREAKOUT_REQUIRE_DIRECTIONAL_BODY")
+
+
+def mock_engine_breakout_require_confirm_bar() -> bool:
+    """Breakout on bar len-2, confirmation on bar len-1."""
+    return _env_truthy("MOCK_ENGINE_BREAKOUT_REQUIRE_CONFIRM_BAR")
+
+
+# --- LLM stop / target (option premium rupees; bounds as whole-number %) ---
+
+
+def mock_llm_risk_instruction() -> str:
+    """Free-text appended to LLM prompt for risk style."""
+    return (os.environ.get("MOCK_LLM_RISK_INSTRUCTION") or "").strip()
+
+
+def mock_llm_sltp_target_pct_bounds() -> tuple[float, float]:
+    """
+    Min/max target **above** entry as decimal fraction (e.g. 0.10 = +10%).
+    Env: whole-number percents MOCK_LLM_SLTP_TARGET_PCT_MIN / _MAX.
+    If unset, derived from option_target_premium_fraction with slack.
+    """
+    raw_lo = (os.environ.get("MOCK_LLM_SLTP_TARGET_PCT_MIN") or "").strip()
+    raw_hi = (os.environ.get("MOCK_LLM_SLTP_TARGET_PCT_MAX") or "").strip()
+    base = option_target_premium_fraction()
+    if raw_lo and raw_hi:
+        try:
+            lo = max(0.01, float(raw_lo) / 100.0)
+            hi = max(lo + 0.001, min(5.0, float(raw_hi) / 100.0))
+            return lo, hi
+        except ValueError:
+            pass
+    lo = max(0.005, base * 0.25)
+    hi = max(lo + 0.01, min(4.0, base * 3.0))
+    return lo, hi
+
+
+def mock_llm_sltp_stop_pct_bounds() -> tuple[float, float]:
+    """
+    Min/max stop **below** entry as decimal fraction of entry (e.g. 0.10 = 10% below).
+    Env: MOCK_LLM_SLTP_STOP_PCT_MIN / _MAX whole-number percents (distance below entry).
+    If unset, derived from option_stop_premium_fraction with slack.
+    """
+    raw_lo = (os.environ.get("MOCK_LLM_SLTP_STOP_PCT_MIN") or "").strip()
+    raw_hi = (os.environ.get("MOCK_LLM_SLTP_STOP_PCT_MAX") or "").strip()
+    base = option_stop_premium_fraction()
+    if raw_lo and raw_hi:
+        try:
+            lo = max(0.001, float(raw_lo) / 100.0)
+            hi = max(lo + 0.001, min(0.95, float(raw_hi) / 100.0))
+            return lo, hi
+        except ValueError:
+            pass
+    lo = max(0.005, base * 0.25)
+    hi = max(lo + 0.01, min(0.90, base * 2.5))
+    return lo, hi
+
+
+def mock_llm_sltp_fallback_to_env() -> bool:
+    """If true, invalid LLM stop/target use env multipliers instead of aborting."""
+    return _env_truthy("MOCK_LLM_SLTP_FALLBACK")

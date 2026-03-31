@@ -4,7 +4,7 @@ This document describes how the **NSE index options mock engine** works in trade
 
 It reflects the implementation in `trade_claw/mock_engine_run.py`, `trade_claw/mock_trading_graph.py`, `trade_claw/mock_market_signal.py`, `trade_claw/mock_trade_store.py`, and `trade_claw/kite_headless.py`. **Envelope bandwidth and option target/stop** resolve from environment variables in **`trade_claw/env_trading_params.py`** (same module as the F&O Options / F&O Agent pages); see `.env.example` — **Trading defaults**.
 
-**Envelope signal rules** (22-bar warmup, fresh cross on the last bar, optional clear margin past the band): [MOCK_ENGINE_BREAKOUT_RULES.md](MOCK_ENGINE_BREAKOUT_RULES.md).
+**Envelope signal rules** (warmup, fresh cross on the breakout bar, optional clear margin, optional strict filters and 2-bar confirm): [MOCK_ENGINE_BREAKOUT_RULES.md](MOCK_ENGINE_BREAKOUT_RULES.md).
 
 ---
 
@@ -138,8 +138,8 @@ flowchart LR
 
 1. If **`signal_underlying`** is set in state (Celery passes one index per invoke), only that key is scanned (must appear in **`MOCK_ENGINE_UNDERLYINGS`**). Otherwise the node scans **all** keys in order (legacy single-invoke behaviour).
 2. For each key in that list, loads **full session** spot **1-minute** candles for `session_d` from **09:15 to 15:30** (`load_index_session_minute_df` → `fetch_underlying_intraday`).
-3. Runs `envelope_breakout_on_last_bar` with **20-period EMA** and bandwidth from **`env_trading_params.fno_envelope_decimal_per_side()`** (env `MOCK_AGENT_ENVELOPE_PCT`; default **0.25** = **25%** each side when unset). Tighter bands: e.g. `MOCK_AGENT_ENVELOPE_PCT=0.003`. Geometry matches `strategies._envelope_series` when the same decimal is passed as `pct`. The dataframe must pass a **warmup** bar count (`max(ema_period+2, 22)`; see [MOCK_ENGINE_BREAKOUT_RULES.md](MOCK_ENGINE_BREAKOUT_RULES.md)), and an optional **clear break** past the band is enforced when `MOCK_ENGINE_BREAKOUT_CLEAR_PCT` is non-zero (`env_trading_params.mock_engine_breakout_clear_pct()`).
-4. **Trigger** (on the **latest** completed bar only): **first** key in the **scan list** that shows a valid breakout wins; state includes **`underlying`** (the index key).
+3. Runs `envelope_breakout_on_last_bar` with **20-period EMA** and bandwidth from **`env_trading_params.fno_envelope_decimal_per_side()`** (env `MOCK_AGENT_ENVELOPE_PCT`; default **0.25** = **25%** each side when unset). Tighter bands: e.g. `MOCK_AGENT_ENVELOPE_PCT=0.003`. Geometry matches `strategies._envelope_series` when the same decimal is passed as `pct`. The dataframe must pass a **warmup** bar count (depends on optional strict filters and confirm bar; see [MOCK_ENGINE_BREAKOUT_RULES.md](MOCK_ENGINE_BREAKOUT_RULES.md)). An optional **clear break** past the band is enforced when `MOCK_ENGINE_BREAKOUT_CLEAR_PCT` is non-zero (`env_trading_params.mock_engine_breakout_clear_pct()`). Optional **strict** body / wick / range / volume / directional-body filters and **`MOCK_ENGINE_BREAKOUT_REQUIRE_CONFIRM_BAR`** are documented in the same file.
+4. **Trigger**: **first** key in the **scan list** that shows a valid breakout wins; state includes **`underlying`** (the index key). **Spot** and **signal_bar_time** use the **confirm** bar when two-bar confirm is enabled, else the breakout (latest) bar.
    - Close crosses **above** upper band (and clear-break rules if configured) → **BULLISH**, leg **CE**.
    - Close crosses **below** lower band (and clear-break rules if configured) → **BEARISH**, leg **PE**.
 5. If no key in the scan list produces a cross → state gets aggregated `signal_text` / `notes`; routing sends flow to **END** (no LLM).
@@ -153,15 +153,15 @@ flowchart LR
 
 ### Node: `llm`
 
-1. **Structured output** (`LLMPick`): `tradingsymbol`, `rationale` only (stop/target are **not** from the model).
+1. **Structured output** (`LLMPick`): `tradingsymbol`, `rationale`, **`stop_loss`**, **`target`** — option **premium** levels in **₹** for the chosen contract. The system prompt injects suggested % distances from `option_stop_premium_fraction` / `option_target_premium_fraction`, hard **min/max % bands** from `mock_llm_sltp_target_pct_bounds` / `mock_llm_sltp_stop_pct_bounds` (env `MOCK_LLM_SLTP_*` or derived defaults), and optional operator text from **`MOCK_LLM_RISK_INSTRUCTION`**.
 2. Validates `tradingsymbol` is **exactly** one of the five candidates.
 
 ### Node: `execute`
 
 1. Re-reads LTP for the chosen symbol.
 2. **Entry (mock BUY)**: `entry_price = max(0.01, ltp - slippage)` with slippage in the configured rupee range.
-3. Sets **stop** and **target** from env as fractions of synthetic **entry**: `MOCK_ENGINE_OPTION_STOP_PCT` (default **25** → 25% below entry) and `MOCK_ENGINE_OPTION_TARGET_PCT` (default **25** → 25% above). If `MOCK_ENGINE_OPTION_STOP_PCT` is unset, **`MOCK_ENGINE_STOP_LOSS_CLAMP_PCT`** is used as the stop percent (legacy alias; default **25**).
-4. Sizes with `fo_lot_qty_for_allocation` and `ALLOCATED_AMOUNT` → whole lots → `quantity` = units for PnL.
+3. **Stop / target**: `_resolve_entry_sltp` validates LLM **`stop_loss`** and **`target`** vs **`entry`**: require `0 < stop < entry < target`, and rupee levels within the env **percent bands** (see `env_trading_params.mock_llm_sltp_*`). Values are **rounded** to two decimals. If validation fails and **`MOCK_LLM_SLTP_FALLBACK=1`**, stop/target fall back to the same **env multipliers** as before (`mock_engine_option_stop_multiplier` / `mock_engine_option_target_multiplier`). If validation fails and fallback is **off**, the node returns **`error`** and does **not** insert.
+4. **`quantity`** = one exchange **lot** (`lot_size` units) for PnL.
 5. **`insert_open_trade`** (includes **`index_underlying`**, normalized uppercase) → new `OPEN` row (`mock_trade_store`). At most **one** `OPEN` row per `index_underlying` (enforced by pre-insert check, **`IntegrityError`** handling, and partial unique index **`idx_mock_trades_one_open_per_index`** where possible).
 
 There is **no** explicit `transaction_type` column in SQLite; behaviour is **BUY** on insert and **SELL** on close in the sense that exits are always closing the long (synthetic sell at LTP minus slippage).
@@ -191,7 +191,7 @@ Core columns match the product blueprint; two extra columns support realistic Pn
 | `instrument` | NFO `tradingsymbol` |
 | `direction` | `BULLISH` / `BEARISH` |
 | `entry_price` | Simulated **buy** fill (LTP minus slippage) |
-| `stop_loss` / `target` | Premium levels from env percents vs `entry_price` (not from the LLM) |
+| `stop_loss` / `target` | Premium levels from validated LLM output (or env multipliers when `MOCK_LLM_SLTP_FALLBACK=1`) |
 | `llm_rationale` | Model explanation |
 | `status` | `OPEN` / `CLOSED` |
 | `exit_price` / `realized_pnl` | Set on close |
@@ -259,6 +259,11 @@ Telemetry (`last_scan` / `last_graph`) and mock trades live in the same SQLite f
 | `MOCK_ENGINE_OPTION_TARGET_PCT` | Target as whole-number % **above** entry when set. If unset, **`FO_OPTION_TARGET_PCT`** (decimal, default **0.25**) applies. |
 | `MOCK_ENGINE_STOP_LOSS_CLAMP_PCT` | Legacy: used **only** when `MOCK_ENGINE_OPTION_STOP_PCT` is unset; same whole-number % semantics as stop above (takes precedence over `FO_OPTION_*` when set). |
 | `MOCK_ENGINE_LOG_COLOR` | `1` (default): ANSI colors for `[mock_market_scan]` logs in a TTY; `0` / `false` to disable (also respects `NO_COLOR`). |
+| `MOCK_ENGINE_BREAKOUT_*` | Optional strict breakout filters and 2-bar confirm — see [MOCK_ENGINE_BREAKOUT_RULES.md](MOCK_ENGINE_BREAKOUT_RULES.md) and `.env.example`. |
+| `MOCK_LLM_SLTP_TARGET_PCT_MIN` / `MOCK_LLM_SLTP_TARGET_PCT_MAX` | Whole-number **% above entry** for valid LLM target (both must be set to override derived defaults). |
+| `MOCK_LLM_SLTP_STOP_PCT_MIN` / `MOCK_LLM_SLTP_STOP_PCT_MAX` | Whole-number **% below entry** for valid LLM stop (band width; both must be set to override derived defaults). |
+| `MOCK_LLM_SLTP_FALLBACK` | If `1`, invalid or missing LLM stop/target → env option stop/target multipliers instead of aborting execute. |
+| `MOCK_LLM_RISK_INSTRUCTION` | Free-text appended to the LLM system prompt. |
 | `REDIS_URL` / `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Celery |
 
 See `.env.example` (**Trading defaults**). Implementation: `trade_claw/env_trading_params.py`.

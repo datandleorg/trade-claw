@@ -15,6 +15,13 @@ from trade_claw.env_trading_params import (
     fo_options_default_option_target_pct_ui,
     fno_envelope_decimal_per_side,
     mock_engine_breakout_clear_pct,
+    mock_engine_breakout_max_lower_wick_frac,
+    mock_engine_breakout_max_upper_wick_frac,
+    mock_engine_breakout_min_body_frac,
+    mock_engine_breakout_range_expand_lookback,
+    mock_engine_breakout_require_confirm_bar,
+    mock_engine_breakout_require_directional_body,
+    mock_engine_breakout_volume_lookback,
     mock_engine_option_stop_multiplier,
     mock_engine_option_target_multiplier,
     mock_engine_stop_loss_floor_multiplier,
@@ -133,6 +140,116 @@ def nse_index_ltp_symbol(underlying_key: str) -> str | None:
     return f"NSE:{ts}" if ts else None
 
 
+def _bar_ohlc(df, i: int) -> tuple[float, float, float, float]:
+    row = df.iloc[i]
+    return (
+        float(row["open"]),
+        float(row["high"]),
+        float(row["low"]),
+        float(row["close"]),
+    )
+
+
+def _candle_range(h: float, l: float) -> float:
+    return max(h - l, 1e-12)
+
+
+def _body_frac(o: float, h: float, l: float, c: float) -> float:
+    return abs(c - o) / _candle_range(h, l)
+
+
+def _lower_wick_frac(o: float, h: float, l: float, c: float) -> float:
+    return (min(o, c) - l) / _candle_range(h, l)
+
+
+def _upper_wick_frac(o: float, h: float, l: float, c: float) -> float:
+    return (h - max(o, c)) / _candle_range(h, l)
+
+
+def _strict_breakout_bar_ok(
+    df,
+    i_b: int,
+    *,
+    direction: str,
+) -> tuple[bool, str]:
+    """Apply optional body / wick / range / volume / directional-body filters at ``i_b``."""
+    o, h, l, c = _bar_ohlc(df, i_b)
+
+    min_body = mock_engine_breakout_min_body_frac()
+    if min_body > 0:
+        if _body_frac(o, h, l, c) < min_body:
+            return False, f"body fraction < {min_body:.3f} (need stronger body vs range)"
+
+    cap_lo = mock_engine_breakout_max_lower_wick_frac()
+    if cap_lo > 0 and _lower_wick_frac(o, h, l, c) > cap_lo:
+        return False, f"lower wick / range > {cap_lo:.3f}"
+    cap_hi = mock_engine_breakout_max_upper_wick_frac()
+    if cap_hi > 0 and _upper_wick_frac(o, h, l, c) > cap_hi:
+        return False, f"upper wick / range > {cap_hi:.3f}"
+
+    if mock_engine_breakout_require_directional_body():
+        if direction == "BULLISH" and not (c > o):
+            return False, "directional body: need close > open (bull)"
+        if direction == "BEARISH" and not (c < o):
+            return False, "directional body: need close < open (bear)"
+
+    n_rng = mock_engine_breakout_range_expand_lookback()
+    if n_rng > 0:
+        if i_b < n_rng:
+            return False, "range expansion: insufficient history"
+        cur_rng = float(df["high"].iloc[i_b]) - float(df["low"].iloc[i_b])
+        prior = df["high"].iloc[i_b - n_rng : i_b] - df["low"].iloc[i_b - n_rng : i_b]
+        mean_prior = float(prior.mean())
+        if mean_prior <= 1e-12 or cur_rng <= mean_prior:
+            return False, f"range not expanded vs prior {n_rng} bars (mean prior {mean_prior:.4f})"
+
+    m_vol = mock_engine_breakout_volume_lookback()
+    if m_vol > 0 and "volume" in df.columns:
+        try:
+            slice_hi = df["volume"].iloc[max(0, i_b - m_vol) : i_b + 1]
+            if float(slice_hi.fillna(0).abs().max()) <= 0:
+                pass  # index / zero-volume feed: skip volume rule
+            else:
+                win = df["volume"].iloc[i_b - m_vol : i_b]
+                v_b = float(df["volume"].iloc[i_b])
+                mean_v = float(win.mean())
+                if mean_v > 1e-12 and v_b <= mean_v:
+                    return False, f"volume not above prior {m_vol}-bar mean"
+        except (TypeError, ValueError, KeyError):
+            pass
+
+    return True, ""
+
+
+def _confirm_bar_ok(
+    df,
+    i_b: int,
+    i_c: int,
+    *,
+    direction: str,
+    upper,
+    lower,
+) -> tuple[bool, str]:
+    """Second bar holds breakout (``i_c`` = latest bar)."""
+    o_c, h_c, l_c, c_c = _bar_ohlc(df, i_c)
+    u_c = float(upper.iloc[i_c])
+    lo_c = float(lower.iloc[i_c])
+    _, _, l_b, c_b = _bar_ohlc(df, i_b)
+    _, h_b, _, _ = _bar_ohlc(df, i_b)
+
+    if direction == "BULLISH":
+        if not (c_c > u_c):
+            return False, "confirm: close not above upper band"
+        if not (c_c >= c_b or l_c >= l_b):
+            return False, "confirm: structure not held (close/low vs breakout bar)"
+    else:
+        if not (c_c < lo_c):
+            return False, "confirm: close not below lower band"
+        if not (c_c <= c_b or h_c <= h_b):
+            return False, "confirm: structure not held (close/high vs breakout bar)"
+    return True, ""
+
+
 def envelope_breakout_on_last_bar(
     df,
     *,
@@ -140,10 +257,13 @@ def envelope_breakout_on_last_bar(
     pct: float,
 ) -> tuple[bool, str, dict]:
     """
-    True if the **most recent** bar completes an envelope cross (same geometry as `_ma_envelope_analysis`).
-    Requires **warmup**: at least ``max(ema_period + 2, MOCK_ENGINE_MIN_WARMUP_BARS)`` session bars.
-    Optional **clear break**: close must exceed the band by ``mock_engine_breakout_clear_pct`` of band level
-    (env ``MOCK_ENGINE_BREAKOUT_CLEAR_PCT``; ``0`` = touch/cross only).
+    True if the session completes an envelope cross on the breakout bar (latest bar, or
+    penultimate bar when ``MOCK_ENGINE_BREAKOUT_REQUIRE_CONFIRM_BAR`` is set).
+
+    Requires **warmup**: enough bars for EMA, cross, optional strict filters, and optional confirm.
+    Optional **clear break**: ``MOCK_ENGINE_BREAKOUT_CLEAR_PCT``. Strict filters (body, wicks,
+    range expansion, volume, directional body) are env-gated; ``0`` / unset disables each.
+
     BUY cross → BULLISH (long CE); SELL cross → BEARISH (long PE).
     """
     empty: dict = {
@@ -152,24 +272,35 @@ def envelope_breakout_on_last_bar(
         "spot": None,
         "signal_bar_time": None,
     }
-    min_bars = max(ema_period + 2, MOCK_ENGINE_MIN_WARMUP_BARS)
+    confirm = mock_engine_breakout_require_confirm_bar()
+    extra = 1 if confirm else 0
+    n_rng = mock_engine_breakout_range_expand_lookback()
+    m_vol = mock_engine_breakout_volume_lookback()
+    min_bars = max(ema_period + 2 + extra, MOCK_ENGINE_MIN_WARMUP_BARS + extra)
+    if n_rng > 0:
+        min_bars = max(min_bars, n_rng + 1 + extra)
+    if m_vol > 0:
+        min_bars = max(min_bars, m_vol + 1 + extra)
+
     if df is None or len(df) < min_bars:
         return (
             False,
-            f"Warmup: need at least {min_bars} session bars (EMA {ema_period} + envelope cross); "
-            f"got {0 if df is None else len(df)}.",
+            f"Warmup: need at least {min_bars} session bars (EMA {ema_period} + envelope cross"
+            f"{', confirm bar' if confirm else ''}); got {0 if df is None else len(df)}.",
             empty,
         )
 
     close = df["close"]
     center, upper, lower = _envelope_series(df, ema_period, pct)
-    i = len(df) - 1
-    c = float(close.iloc[i])
-    c_prev = float(close.iloc[i - 1])
-    u = float(upper.iloc[i])
-    u_prev = float(upper.iloc[i - 1])
-    lo = float(lower.iloc[i])
-    lo_prev = float(lower.iloc[i - 1])
+    i_c = len(df) - 1
+    i_b = i_c - 1 if confirm else i_c
+
+    c = float(close.iloc[i_b])
+    c_prev = float(close.iloc[i_b - 1])
+    u = float(upper.iloc[i_b])
+    u_prev = float(upper.iloc[i_b - 1])
+    lo = float(lower.iloc[i_b])
+    lo_prev = float(lower.iloc[i_b - 1])
 
     if c > u and c_prev <= u_prev:
         direction = "BULLISH"
@@ -180,8 +311,9 @@ def envelope_breakout_on_last_bar(
         leg = "PE"
         side = "below lower"
     else:
+        bar_label = "confirm bar" if confirm else "latest bar"
         text = (
-            f"EMA({ema_period}) ±{100 * pct:.2f}%: no fresh cross on latest bar. "
+            f"EMA({ema_period}) ±{100 * pct:.2f}%: no fresh cross on breakout ({bar_label} index {i_b}). "
             f"Close ₹{c:,.2f}, upper ₹{u:,.2f}, lower ₹{lo:,.2f}."
         )
         return False, text, empty
@@ -209,25 +341,43 @@ def envelope_breakout_on_last_bar(
                 )
                 return False, text, empty
 
-    ts = df.iloc[i]["date"]
+    ok_strict, strict_reason = _strict_breakout_bar_ok(df, i_b, direction=direction)
+    if not ok_strict:
+        text = (
+            f"EMA({ema_period}) ±{100 * pct:.2f}%: cross {side} rejected (strict filter): {strict_reason}."
+        )
+        return False, text, empty
+
+    if confirm:
+        ok_c, c_reason = _confirm_bar_ok(df, i_b, i_c, direction=direction, upper=upper, lower=lower)
+        if not ok_c:
+            text = f"EMA({ema_period}) ±{100 * pct:.2f}%: breakout ok but confirm bar failed: {c_reason}."
+            return False, text, empty
+
+    i_sig = i_c if confirm else i_b
+    spot = float(close.iloc[i_sig])
+    ts = df.iloc[i_sig]["date"]
     try:
         signal_bar_time = str(ts)
     except Exception:
         signal_bar_time = None
 
-    ce = float(center.iloc[i])
+    ce = float(center.iloc[i_sig])
+    u_sig = float(upper.iloc[i_sig])
+    lo_sig = float(lower.iloc[i_sig])
+    bar_note = "confirm bar" if confirm else "latest bar"
     text = (
-        f"EMA({ema_period}) ±{100 * pct:.2f}%: break {side} on latest bar. "
-        f"Center ₹{ce:,.2f}, spot close ₹{c:,.2f} → {direction} (long {leg})."
+        f"EMA({ema_period}) ±{100 * pct:.2f}%: break {side} on breakout bar; spot from {bar_note}. "
+        f"Center ₹{ce:,.2f}, spot close ₹{spot:,.2f} → {direction} (long {leg})."
     )
     sig = {
         "direction": direction,
         "leg": leg,
-        "spot": c,
+        "spot": spot,
         "signal_bar_time": signal_bar_time,
         "center": ce,
-        "upper": u,
-        "lower": lo,
+        "upper": u_sig,
+        "lower": lo_sig,
     }
     return True, text, sig
 
