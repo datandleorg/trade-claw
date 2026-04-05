@@ -49,13 +49,17 @@ On first boot, Nginx uses an **HTTP-only** config (ACME webroot + proxy to Strea
 
 ## 4. Obtain the first TLS certificate
 
-Run Certbot **once** against the shared webroot (Nginx must be up).
+The **`certbot` container that stays running** only runs `certbot renew` on a timer. It does **not** request your first certificate. Until you run **`certbot certonly` once**, `/etc/letsencrypt/live/` will not exist and Nginx will stay on HTTP-only.
+
+Run Certbot **once** against the shared webroot (**Nginx must already be up** on ports 80/443).
 
 **Recommended:** hostnames and email are taken from `.env` (`DOMAINS` or `DOMAIN`, plus `CERTBOT_EMAIL`):
 
 ```bash
 ./deploy/certbot-certonly.sh
 ```
+
+If you see **Permission denied**, set the execute bit once (`chmod +x deploy/certbot-certonly.sh`) or run `bash deploy/certbot-certonly.sh`.
 
 The script turns `DOMAINS=trade.example.com,www.trade.example.com` into multiple `-d` flags. The **first** hostname is the default Let’s Encrypt `live/<name>/` directory (keep the same order as in `.env`).
 
@@ -97,6 +101,7 @@ Or add a **cron** job (example: daily at 03:00):
 
 ## 6. Operations
 
+- **List certificates:** `docker compose -f docker-compose.prod.yml --env-file .env run --rm certbot certificates`
 - **Logs:** `docker compose -f docker-compose.prod.yml logs -f streamlit` (or `nginx`, `celery-worker`, etc.).
 - **Stop:** `docker compose -f docker-compose.prod.yml down`
 - **App data** (SQLite, `.kite_session.json`, etc.) lives in the **`trade_claw_app_data`** named volume; TLS material in **`letsencrypt`**; ACME webroot in **`certbot-www`**.
