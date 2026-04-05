@@ -25,17 +25,17 @@ This stack uses [docker-compose.prod.yml](../docker-compose.prod.yml): **Redis**
 In the project root, copy [.env.example](../.env.example) to `.env` and set at least:
 
 - `KITE_API_KEY`, `KITE_API_SECRET`, and any other app keys you use (see `.env.example`).
-- **`DOMAIN`** — hostname Nginx will serve (e.g. `app.example.com`). Required for production Compose.
+- **`DOMAINS`** — comma-separated hostnames Nginx will answer on (no spaces, or spaces trimmed), e.g. `trade.example.com,www.trade.example.com`. **Alternatively**, set a single **`DOMAIN`** (legacy) if you only need one hostname.
 - **`CERTBOT_EMAIL`** — used only for the **first** `certbot certonly` (Let’s Encrypt account / expiry notices).
 
-Example:
+Example (apex + `www`):
 
 ```bash
-DOMAIN=app.example.com
+DOMAINS=trade.example.com,www.trade.example.com
 CERTBOT_EMAIL=you@example.com
 ```
 
-For **www** as well, include it in the `certonly` command below (`-d www.example.com`) and ensure DNS exists; the bundled Nginx templates use a single `server_name` from `DOMAIN`.
+**Let’s Encrypt certificate path:** the files under `/etc/letsencrypt/live/<name>/` use **the first** hostname in `DOMAINS` as `<name>` by default when you pass `-d` in that same order to `certbot certonly`. Keep the first entry in `DOMAINS` identical to the first `-d` you used when issuing the cert.
 
 ## 3. Build and start
 
@@ -49,18 +49,19 @@ On first boot, Nginx uses an **HTTP-only** config (ACME webroot + proxy to Strea
 
 ## 4. Obtain the first TLS certificate
 
-Run Certbot **once** against the shared webroot (Nginx must be up). Replace the hostnames and email with the same values as `DOMAIN` and `CERTBOT_EMAIL` in `.env` (add extra `-d` flags for `www`, etc., if DNS is set up):
+Run Certbot **once** against the shared webroot (Nginx must be up). Use one **`-d`** per hostname listed in `DOMAINS` (order should match: the **first** `-d` becomes the default `live/<name>/` directory name):
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env run --rm certbot certonly \
   --webroot -w /var/www/certbot \
-  -d app.example.com \
+  -d trade.example.com \
+  -d www.trade.example.com \
   --email you@example.com \
   --agree-tos \
   --non-interactive
 ```
 
-Then **restart Nginx** so it switches to the HTTPS config (the entrypoint detects `/etc/letsencrypt/live/<DOMAIN>/fullchain.pem`; `<DOMAIN>` must match the **first** `-d` you passed to certbot):
+Then **restart Nginx** so it switches to the HTTPS config (the entrypoint detects `/etc/letsencrypt/live/<first-hostname>/fullchain.pem`):
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env restart nginx

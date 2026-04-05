@@ -97,7 +97,7 @@ To expose Streamlit publicly with the included `ngrok` service:
 
 ## Production (VPS + domain + TLS)
 
-For deployment on a server such as a **DigitalOcean droplet** with your **own domain**, **Nginx** reverse proxy, and **Certbot** (Let’s Encrypt), use **`docker-compose.prod.yml`** and follow **[deploy/README.md](deploy/README.md)**. Set **`DOMAIN`** (and **`CERTBOT_EMAIL`** for the first certificate) in `.env`; see `.env.example`.
+For deployment on a server such as a **DigitalOcean droplet** with your **own domain**, **Nginx** reverse proxy, and **Certbot** (Let’s Encrypt), use **`docker-compose.prod.yml`** and follow **[deploy/README.md](deploy/README.md)**. Set **`DOMAINS`** (comma-separated) or **`DOMAIN`**, plus **`CERTBOT_EMAIL`** for the first certificate, in `.env`; see `.env.example`.
 
 ## Project layout
 

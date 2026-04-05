@@ -1,6 +1,6 @@
 # Production stack: internal Redis + Streamlit/Celery, public Nginx (TLS) + Certbot renewals.
 # Usage: docker compose -f docker-compose.prod.yml --env-file .env up -d
-# Set DOMAIN and CERTBOT_EMAIL in .env (see deploy/README.md).
+# Set DOMAINS (comma-separated) or DOMAIN, and CERTBOT_EMAIL for first cert (see deploy/README.md).
 
 volumes:
   trade_claw_app_data:
@@ -85,8 +85,12 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    env_file:
+      - .env
     environment:
-      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      # Passed through for compose interpolation when using --env-file .env; entrypoint also reads .env via env_file.
+      DOMAINS: ${DOMAINS:-}
+      DOMAIN: ${DOMAIN:-}
     volumes:
       - ./deploy/nginx/docker-entrypoint.sh:/docker-entrypoint-custom.sh:ro
       - ./deploy/nginx/default-init.conf.template:/templates/default-init.conf.template:ro
