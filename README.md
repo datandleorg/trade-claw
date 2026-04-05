@@ -95,6 +95,10 @@ To expose Streamlit publicly with the included `ngrok` service:
 - this stack uses your reserved domain: `https://joesph-nonalliterative-nelida.ngrok-free.dev`
 - optional ngrok inspector is available at `http://localhost:4040`
 
+## Production (VPS + domain + TLS)
+
+For deployment on a server such as a **DigitalOcean droplet** with your **own domain**, **Nginx** reverse proxy, and **Certbot** (Let’s Encrypt), use **`docker-compose.prod.yml`** and follow **[deploy/README.md](deploy/README.md)**. Set **`DOMAIN`** (and **`CERTBOT_EMAIL`** for the first certificate) in `.env`; see `.env.example`.
+
 ## Project layout
 
 | Path | Role |

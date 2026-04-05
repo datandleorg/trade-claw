@@ -1,0 +1,112 @@
+# Production stack: internal Redis + Streamlit/Celery, public Nginx (TLS) + Certbot renewals.
+# Usage: docker compose -f docker-compose.prod.yml --env-file .env up -d
+# Set DOMAIN and CERTBOT_EMAIL in .env (see deploy/README.md).
+
+volumes:
+  trade_claw_app_data:
+  letsencrypt:
+  certbot-www:
+
+networks:
+  default:
+    name: trade_claw_prod
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      uv run streamlit run app.py
+      --server.address 0.0.0.0
+      --server.port 8501
+      --server.enableCORS=false
+    restart: unless-stopped
+    volumes:
+      - trade_claw_app_data:/app/data
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      KITE_SESSION_FILE: /app/data/.kite_session.json
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uv run celery -A trade_claw.celery_app worker --loglevel=info
+    restart: unless-stopped
+    volumes:
+      - trade_claw_app_data:/app/data
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      KITE_SESSION_FILE: /app/data/.kite_session.json
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uv run celery -A trade_claw.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./deploy/nginx/docker-entrypoint.sh:/docker-entrypoint-custom.sh:ro
+      - ./deploy/nginx/default-init.conf.template:/templates/default-init.conf.template:ro
+      - ./deploy/nginx/default-ssl.conf.template:/templates/default-ssl.conf.template:ro
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    entrypoint: ["/bin/sh", "/docker-entrypoint-custom.sh"]
+    depends_on:
+      streamlit:
+        condition: service_started
+
+  certbot:
+    image: certbot/certbot:v2.11.0
+    restart: unless-stopped
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: >
+      /bin/sh -c "trap exit TERM;
+      while :; do
+        certbot renew --webroot -w /var/www/certbot;
+        sleep 12h & wait $${!};
+      done"

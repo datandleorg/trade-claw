@@ -107,7 +107,7 @@ services:
   # when the embedded resolver flakes. Requires streamlit publishing 8501 (see streamlit.ports).
   ngrok:
     image: ngrok/ngrok:latest
-    command: http --log=stdout --url=wintery-wendell-undespondingly.ngrok-free.dev host.docker.internal:8501
+    command: http --log=stdout --url=unfaked-nonexaggeratedly-daisey.ngrok-free.dev host.docker.internal:8501
     environment:
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
     extra_hosts:
