@@ -49,7 +49,17 @@ On first boot, Nginx uses an **HTTP-only** config (ACME webroot + proxy to Strea
 
 ## 4. Obtain the first TLS certificate
 
-Run Certbot **once** against the shared webroot (Nginx must be up). Use one **`-d`** per hostname listed in `DOMAINS` (order should match: the **first** `-d` becomes the default `live/<name>/` directory name):
+Run Certbot **once** against the shared webroot (Nginx must be up).
+
+**Recommended:** hostnames and email are taken from `.env` (`DOMAINS` or `DOMAIN`, plus `CERTBOT_EMAIL`):
+
+```bash
+./deploy/certbot-certonly.sh
+```
+
+The script turns `DOMAINS=trade.example.com,www.trade.example.com` into multiple `-d` flags. The **first** hostname is the default Let’s Encrypt `live/<name>/` directory (keep the same order as in `.env`).
+
+**Manual** (same effect, if you prefer not to use the script):
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env run --rm certbot certonly \
