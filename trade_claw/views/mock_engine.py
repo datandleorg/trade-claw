@@ -12,6 +12,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
 
 from trade_claw import mock_engine_telemetry
 from trade_claw import mock_trade_analytics as mtd_an
@@ -239,6 +240,59 @@ def _nse_symbol_quote(kite, nse_key: str) -> tuple[float | None, float | None]:
 
 def _safe_key_fragment(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", s)[:48] or "x"
+
+
+def _mock_engine_trade_sound_html(steps: list[str]) -> str:
+    """Web Audio: two-tone bell (detection) + square-wave buzzer (execution). ``steps`` = kinds in order."""
+    payload = json.dumps(steps)
+    return f"""
+<div style="height:0;width:0;overflow:hidden" aria-hidden="true">
+<script>
+(function () {{
+  const steps = {payload};
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx || !steps.length) return;
+  const ctx = new Ctx();
+  function resume() {{
+    if (ctx.state === "suspended") ctx.resume();
+  }}
+  function toneBurst(t0, freq, dur, gainHi, wave) {{
+    resume();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = wave;
+    o.frequency.value = freq;
+    o.connect(g);
+    g.connect(ctx.destination);
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(gainHi, t0 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.01, t0 + dur);
+    o.start(t0);
+    o.stop(t0 + dur + 0.01);
+  }}
+  function playDetection(t0) {{
+    toneBurst(t0, 880, 0.2, 0.2, "sine");
+    toneBurst(t0 + 0.16, 1174.66, 0.22, 0.18, "sine");
+  }}
+  function playExecution(t0) {{
+    toneBurst(t0, 220, 0.32, 0.42, "square");
+    toneBurst(t0 + 0.38, 165, 0.22, 0.32, "square");
+  }}
+  let nextT = ctx.currentTime + 0.06;
+  for (let i = 0; i < steps.length; i++) {{
+    const k = steps[i];
+    if (k === "detection") {{
+      playDetection(nextT);
+      nextT += 0.52;
+    }} else if (k === "execution") {{
+      playExecution(nextT);
+      nextT += 0.72;
+    }}
+  }}
+}})();
+</script>
+</div>
+"""
 
 
 def _opt_ltp(kite, tradingsymbol: str | None) -> float | None:
@@ -576,8 +630,8 @@ def render_mock_engine(kite):
     st.title("Mock AI engine (indices + Nifty 50)")
     st.caption(
         "Celery Beat runs `scan_mock_market` **every minute** (IST weekdays, ~09:15–15:19 entries; 15:20 square-off). "
-        "Default underlyings: **3 indices + all Nifty 50 stocks** (override with `MOCK_ENGINE_UNDERLYINGS`). "
-        "Live tab **auto-refreshes every minute**. **At most one OPEN mock trade per underlying.**"
+        "Scan list = **`FO_UNDERLYING_OPTIONS`** in `constants.py` (same as F&O Options); optional env **`MOCK_ENGINE_UNDERLYINGS`** comma subset. "
+        "Live tab **auto-refreshes every 10 seconds**. **At most one OPEN mock trade per underlying.**"
     )
     st.markdown(f"| DB path | `{MOCK_TRADES_DB_PATH}` |")
     _br1, _br2, _br3 = st.columns([1, 1, 2])
@@ -619,6 +673,38 @@ def render_mock_engine(kite):
         snap = mock_engine_telemetry.read_snapshot()
         last_scan = snap.get("last_scan") or {}
         last_graph = snap.get("last_graph") or {}
+
+        if "mock_engine_sound_seen_ids" not in st.session_state:
+            st.session_state.mock_engine_sound_seen_ids = set()
+
+        _sc1, _sc2 = st.columns([1, 2])
+        with _sc1:
+            bells_on = st.checkbox(
+                "Trade bells (detection + execution)",
+                value=True,
+                key="mock_eng_trade_bells",
+                help="Bell tones when the worker sees an envelope breakout; buzzer when a mock trade is inserted. "
+                "Some browsers mute Web Audio until you interact with the tab.",
+            )
+
+        raw_sound = last_scan.get("sound_alerts")
+        if not isinstance(raw_sound, list):
+            raw_sound = []
+        seen_ids: set = st.session_state.mock_engine_sound_seen_ids
+        play_kinds: list[str] = []
+        for item in raw_sound:
+            if not isinstance(item, dict):
+                continue
+            aid = item.get("id")
+            kind = item.get("kind")
+            if not aid or kind not in ("detection", "execution"):
+                continue
+            if aid in seen_ids:
+                continue
+            seen_ids.add(aid)
+            play_kinds.append(str(kind))
+        if bells_on and play_kinds:
+            components.html(_mock_engine_trade_sound_html(play_kinds), height=0)
 
         open_rows = mock_trade_store.list_open_trades()
         und = mock_engine_underlyings()
@@ -924,6 +1010,15 @@ def render_mock_engine(kite):
         if not rows:
             st.caption("No rows in `mock_trades` yet.")
         else:
+            ltp_cache: dict[str, float | None] = {}
+
+            def _cached_opt_ltp(sym: str | None) -> float | None:
+                if not sym:
+                    return None
+                if sym not in ltp_cache:
+                    ltp_cache[sym] = _opt_ltp(kite, sym)
+                return ltp_cache[sym]
+
             data = []
             for r in rows:
                 try:
@@ -932,6 +1027,15 @@ def render_mock_engine(kite):
                     pnl_f = None
                 if pnl_f is not None and pnl_f != pnl_f:
                     pnl_f = None
+                st_open = (r.status or "").strip().upper() == "OPEN"
+                ltp_v: float | None = None
+                unreal_v: float | None = None
+                if st_open:
+                    ltp_v = _cached_opt_ltp(r.instrument)
+                    ep = float(r.entry_price or 0)
+                    q = int(r.quantity or 1)
+                    if ltp_v is not None and ep > 0 and q > 0:
+                        unreal_v = (ltp_v - ep) * q
                 data.append(
                     {
                         "trade_id": r.trade_id,
@@ -945,11 +1049,43 @@ def render_mock_engine(kite):
                         "target": r.target,
                         "status": r.status,
                         "exit": r.exit_price,
-                        "PnL": pnl_f,
+                        "LTP": ltp_v,
+                        "PnL": pnl_f if not st_open else None,
+                        "Unrealised PnL": unreal_v,
                         "qty": r.quantity,
                     }
                 )
-            df_book = pd.DataFrame(data)
+
+            total_real_portfolio = mock_trade_store.sum_realized_pnl_closed()
+            total_unreal_portfolio = 0.0
+            for ot in mock_trade_store.list_open_trades():
+                lp = _cached_opt_ltp(ot.instrument)
+                ep = float(ot.entry_price or 0)
+                q = int(ot.quantity or 1)
+                if lp is not None and ep > 0 and q > 0:
+                    total_unreal_portfolio += (lp - ep) * q
+
+            summary_row = {
+                "trade_id": "Total (portfolio)",
+                "entry_time": "",
+                "exit_time": "",
+                "instrument": "",
+                "index": "",
+                "direction": "",
+                "entry": None,
+                "stop": None,
+                "target": None,
+                "status": "",
+                "exit": None,
+                "LTP": None,
+                "PnL": total_real_portfolio,
+                "Unrealised PnL": total_unreal_portfolio,
+                "qty": None,
+            }
+            df_book = pd.concat(
+                [pd.DataFrame(data), pd.DataFrame([summary_row])],
+                ignore_index=True,
+            )
 
             def _pnl_color(s: pd.Series) -> list[str]:
                 out: list[str] = []
@@ -964,13 +1100,25 @@ def render_mock_engine(kite):
                         out.append("")
                 return out
 
-            st.dataframe(
-                df_book.style.format({"PnL": "₹{:,.2f}"}, na_rep="—").apply(
-                    _pnl_color, subset=["PnL"]
-                ),
-                use_container_width=True,
-                hide_index=True,
+            st.caption(
+                "**LTP** / **Unrealised PnL** for **OPEN** legs (live quote). "
+                "**PnL** = realised on **CLOSED**. Last row: all-time realised (closed) + current unrealised (all open legs)."
             )
+            fmt = {
+                "entry": "₹{:,.2f}",
+                "stop": "₹{:,.2f}",
+                "target": "₹{:,.2f}",
+                "exit": "₹{:,.2f}",
+                "LTP": "₹{:,.2f}",
+                "PnL": "₹{:,.2f}",
+                "Unrealised PnL": "₹{:,.2f}",
+            }
+            sty_book = (
+                df_book.style.format(fmt, na_rep="—")
+                .apply(_pnl_color, subset=["PnL"])
+                .apply(_pnl_color, subset=["Unrealised PnL"])
+            )
+            st.dataframe(sty_book, use_container_width=True, hide_index=True)
 
         chart_rows = mock_trade_store.trades_for_chart()
         if chart_rows:

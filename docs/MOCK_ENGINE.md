@@ -11,7 +11,7 @@ It reflects the implementation in `trade_claw/mock_engine_run.py`, `trade_claw/m
 ## 1. Purpose and boundaries
 
 - **Mock only**: no `place_order` or live broker execution. Rows in `mock_trades` represent simulated long-premium trades.
-- **Underlying**: Configurable NSE spot series (`MOCK_ENGINE_UNDERLYINGS`). **Default** = `FO_INDEX_UNDERLYING_KEYS` (NIFTY, BANKNIFTY, MIDCPNIFTY) **plus all Nifty 50 equity symbols**, in that order, via `fetch_underlying_intraday`. Each minute tick runs the LangGraph **once per underlying** that has **no** `OPEN` row for that `index_underlying`; each run evaluates the envelope on **that** symbol only (`signal_underlying` in initial state).
+- **Underlying**: NSE spot series from `mock_engine_underlyings()` in `mock_market_signal.py`. **Default** = `FO_UNDERLYING_OPTIONS` in `trade_claw/constants.py` (same ordered list as the **F&O Options** underlying dropdown). Optional env **`MOCK_ENGINE_UNDERLYINGS`** = comma-separated subset of that list (invalid symbols ignored). Each minute tick runs the LangGraph **once per underlying** that has **no** `OPEN` row for that `index_underlying`; each run evaluates the envelope on **that** symbol only (`signal_underlying` in initial state), via `fetch_underlying_intraday`.
 - **Options**: NFO contracts on **that** index; **long-only** — bullish signals trade **CE** only, bearish **PE** only (the opposite leg is never shown to the LLM).
 - **Concurrency model**: Celery Beat triggers a scan **about once per minute** on weekdays during configured hours; Streamlit only **reads** the SQLite database and does not drive the loop.
 
@@ -103,7 +103,7 @@ Each invocation of `run_scan()` (from `trade_claw/mock_engine_run.py`) follows t
 If **not** in the force square-off branch, the scan continues:
 
 - **`in_entry_window`**: new mock entries are allowed only on weekdays when IST time is **≥ 09:15** and **< 15:20** (aligned with “no new risk” after the square-off window).
-- **Per index**: there is **no** global “flat only” gate. For each key `u` in `MOCK_ENGINE_UNDERLYINGS`, if **`has_open_trade_for_underlying(u)`** is true, that index’s graph run is skipped for this tick (`runs` entry with `skipped: "open_position"`). Otherwise `invoke_mock_graph(..., initial_state={"signal_underlying": u})` runs.
+- **Per underlying**: there is **no** global “flat only” gate. For each key `u` in **`mock_engine_underlyings()`** (default `FO_UNDERLYING_OPTIONS`, or env `MOCK_ENGINE_UNDERLYINGS` subset), if **`has_open_trade_for_underlying(u)`** is true, that underlying’s graph run is skipped for this tick (`runs` entry with `skipped: "open_position"`). Otherwise `invoke_mock_graph(..., initial_state={"signal_underlying": u})` runs.
 
 ### Step 6 — Load instrument masters
 
@@ -112,7 +112,7 @@ If **not** in the force square-off branch, the scan continues:
 ### Step 7 — Run LangGraph (once per flat index) with SQLite checkpointer
 
 - Open **one** `SqliteSaver.from_conn_string(<absolute path to MOCK_TRADES_DB_PATH>)` for the whole loop (plain path string, not a `sqlite://` URL — required by LangGraph’s saver).
-- For each `u` in `MOCK_ENGINE_UNDERLYINGS` without an open leg for `u`, compile+invoke with a **fresh `thread_id` per invocation** so checkpoint rows do not collide across parallel logical runs in the same tick.
+- For each `u` in **`mock_engine_underlyings()`** without an open leg for `u`, compile+invoke with a **fresh `thread_id` per invocation** so checkpoint rows do not collide across parallel logical runs in the same tick.
 
 The Celery result `graph` field holds **`runs`** (list of per-underlying outcomes) and **`per_underlying`** (map keyed by index). Telemetry `last_graph` stores **`tick_ist`**, **`runs`**, and **`per_underlying`** for the Streamlit HUD.
 
@@ -136,7 +136,7 @@ flowchart LR
 
 ### Node: `signal`
 
-1. If **`signal_underlying`** is set in state (Celery passes one index per invoke), only that key is scanned (must appear in **`MOCK_ENGINE_UNDERLYINGS`**). Otherwise the node scans **all** keys in order (legacy single-invoke behaviour).
+1. If **`signal_underlying`** is set in state (Celery passes one underlying per invoke), only that key is scanned (must appear in **`mock_engine_underlyings()`**). Otherwise the node scans **all** keys in order (legacy single-invoke behaviour).
 2. For each key in that list, loads **full session** spot **1-minute** candles for `session_d` from **09:15 to 15:30** (`load_index_session_minute_df` → `fetch_underlying_intraday`).
 3. Runs `envelope_breakout_on_last_bar` with **20-period EMA** and bandwidth from **`env_trading_params.fno_envelope_decimal_per_side()`** (env `MOCK_AGENT_ENVELOPE_PCT`; default **0.25** = **25%** each side when unset). Tighter bands: e.g. `MOCK_AGENT_ENVELOPE_PCT=0.003`. Geometry matches `strategies._envelope_series` when the same decimal is passed as `pct`. The dataframe must pass a **warmup** bar count (depends on optional strict filters and confirm bar; see [MOCK_ENGINE_BREAKOUT_RULES.md](MOCK_ENGINE_BREAKOUT_RULES.md)). An optional **clear break** past the band is enforced when `MOCK_ENGINE_BREAKOUT_CLEAR_PCT` is non-zero (`env_trading_params.mock_engine_breakout_clear_pct()`). Optional **strict** body / wick / range / volume / directional-body filters and **`MOCK_ENGINE_BREAKOUT_REQUIRE_CONFIRM_BAR`** are documented in the same file.
 4. **Trigger**: **first** key in the **scan list** that shows a valid breakout wins; state includes **`underlying`** (the index key). **Spot** and **signal_bar_time** use the **confirm** bar when two-bar confirm is enabled, else the breakout (latest) bar.
@@ -254,7 +254,7 @@ Telemetry (`last_scan` / `last_graph`) and mock trades live in the same SQLite f
 | `MOCK_AGENT_ENVELOPE_PCT` | EMA envelope bandwidth **per side** as decimal (default **0.25** = **25%** each side of EMA20); parsed in `env_trading_params.fno_envelope_decimal_per_side` |
 | `MOCK_AGENT_SLIPPAGE_LO` / `MOCK_AGENT_SLIPPAGE_HI` | Slippage range (rupees) |
 | `MOCK_ENGINE_SNAPSHOT_BARS` | Max 1m bars stored **per leg** for option **and** index spot snapshots at entry/exit (`0` = off, default `60`) |
-| `MOCK_ENGINE_UNDERLYINGS` | Comma-separated index keys; each minute tick runs the graph once per key with no OPEN row for that index. |
+| `MOCK_ENGINE_UNDERLYINGS` | Comma-separated symbols (must each appear in `FO_UNDERLYING_OPTIONS`); each minute tick runs the graph once per listed key with no OPEN row for that underlying. |
 | `MOCK_ENGINE_OPTION_STOP_PCT` | Stop as whole-number % **below** entry when set (clamped 5–90 before use). If unset, **`FO_OPTION_STOP_LOSS_PCT`** (decimal, default **0.10**) applies — see `env_trading_params.option_stop_premium_fraction`. |
 | `MOCK_ENGINE_OPTION_TARGET_PCT` | Target as whole-number % **above** entry when set. If unset, **`FO_OPTION_TARGET_PCT`** (decimal, default **0.25**) applies. |
 | `MOCK_ENGINE_STOP_LOSS_CLAMP_PCT` | Legacy: used **only** when `MOCK_ENGINE_OPTION_STOP_PCT` is unset; same whole-number % semantics as stop above (takes precedence over `FO_OPTION_*` when set). |

@@ -57,7 +57,15 @@ NIFTY50_SYMBOLS = [
     "SBILIFE", "SBIN", "SUNPHARMA", "TATAMOTORS", "TCS", "TATACONSUM", "TATASTEEL",
     "TECHM", "TITAN", "UPL", "WIPRO", "APOLLOHOSP", "BEL", "ULTRACEMCO", "LTIM", "ADANIENT",
 ]
-FO_UNDERLYING_OPTIONS = list(FO_INDEX_UNDERLYING_KEYS) + NIFTY50_SYMBOLS
+# Single list for F&O Options dropdown, F&O Agent underlying select, and mock engine scan defaults
+# (see ``mock_engine_underlyings()``). Override scan order/subset per deploy with env MOCK_ENGINE_UNDERLYINGS.
+FO_UNDERLYING_OPTIONS = [
+    "NIFTY", "BANKNIFTY", "RELIANCE", "HDFCBANK", "ICICIBANK",
+    "SBIN", "KOTAKBANK", "BAJFINANCE", "AXISBANK", "INFY",
+    "TCS", "HCLTECH", "WIPRO", "TATAMOTORS", "MARUTI",
+    "M&M", "ITC", "HINDUNILVR", "LT", "ADANIENT", "ADANIPORTS"
+]
+
 NIFTY50_TOP10 = [
     "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
     "HINDUNILVR", "SBIN", "BHARTIARTL", "ITC", "KOTAKBANK",

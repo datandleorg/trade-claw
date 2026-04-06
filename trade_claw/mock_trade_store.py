@@ -282,6 +282,20 @@ def has_open_trade() -> bool:
     return len(list_open_trades()) > 0
 
 
+def sum_realized_pnl_closed() -> float:
+    """Sum of ``realized_pnl`` for all CLOSED rows (full ledger, not a page limit)."""
+    init_db()
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(realized_pnl), 0.0)
+            FROM mock_trades
+            WHERE status = 'CLOSED' AND realized_pnl IS NOT NULL
+            """
+        ).fetchone()
+    return float(row[0] if row and row[0] is not None else 0.0)
+
+
 def has_open_trade_for_underlying(index_key: str) -> bool:
     """True if any row is OPEN for this index key (normalized uppercase)."""
     iu = _normalize_index_underlying(index_key)

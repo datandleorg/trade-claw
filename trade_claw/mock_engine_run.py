@@ -55,6 +55,53 @@ def _graph_result_telemetry_payload(underlying_key: str, result: dict[str, Any])
     }
 
 
+def _sound_alert_id_token(s: object) -> str:
+    """Stable fragment for alert ids (avoid raw colons in composite keys)."""
+    t = str(s or "").strip()
+    return t.replace(" ", "_").replace(":", "-")
+
+
+def _sound_alerts_from_graph_runs(graph_runs: list[dict[str, Any]], scan_ist: str) -> list[dict[str, Any]]:
+    """UI sound cues: envelope detection vs mock row insert (Streamlit dedupes by alert id)."""
+    ist_tok = _sound_alert_id_token(scan_ist)
+    alerts: list[dict[str, Any]] = []
+    for r in graph_runs:
+        if not isinstance(r, dict):
+            continue
+        u = str(r.get("underlying") or "").strip().upper()
+        if not u or r.get("skipped"):
+            continue
+        direction = r.get("direction")
+        leg = r.get("leg")
+        if direction and leg:
+            sbt = _sound_alert_id_token(r.get("signal_bar_time"))
+            alerts.append(
+                {
+                    "kind": "detection",
+                    "id": f"d:{ist_tok}:{u}:{sbt}",
+                    "underlying": u,
+                    "direction": str(direction),
+                    "leg": str(leg),
+                    "signal_bar_time": r.get("signal_bar_time"),
+                }
+            )
+        tid = r.get("trade_id")
+        if tid is not None:
+            try:
+                tid_int = int(tid)
+            except (TypeError, ValueError):
+                continue
+            alerts.append(
+                {
+                    "kind": "execution",
+                    "id": f"e:{tid_int}",
+                    "trade_id": tid_int,
+                    "underlying": u,
+                }
+            )
+    return alerts
+
+
 def _session_d_from_entry_sql(entry_time: str | None) -> date:
     if not entry_time:
         return session_date_ist(now_ist())
@@ -344,6 +391,7 @@ def run_scan() -> dict[str, Any]:
 
     per_underlying = {str(r["underlying"]): r for r in graph_runs if r.get("underlying")}
     out["graph"] = {"runs": graph_runs, "per_underlying": per_underlying}
+    out["sound_alerts"] = _sound_alerts_from_graph_runs(graph_runs, out["ist"])
     graph_telemetry: dict[str, Any] = {
         "tick_ist": out["ist"],
         "runs": graph_runs,

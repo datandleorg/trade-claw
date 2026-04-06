@@ -8,7 +8,7 @@ import random
 from datetime import date, datetime, time as dtime
 from zoneinfo import ZoneInfo
 
-from trade_claw.constants import ENVELOPE_EMA_PERIOD, FO_INDEX_UNDERLYING_KEYS, NIFTY50_SYMBOLS
+from trade_claw.constants import ENVELOPE_EMA_PERIOD, FO_UNDERLYING_OPTIONS
 from trade_claw.env_trading_params import (
     fo_options_default_envelope_bandwidth_pct,
     fo_options_default_option_stop_loss_pct_ui,
@@ -98,15 +98,15 @@ def session_date_ist(dt: datetime) -> date:
 
 
 def mock_engine_allowed_underlyings() -> frozenset[str]:
-    """Symbols the mock engine may trade: index keys + Nifty 50 equity symbols."""
-    return frozenset(FO_INDEX_UNDERLYING_KEYS) | frozenset(NIFTY50_SYMBOLS)
+    """Symbols the mock engine may trade (same universe as the F&O Options underlying list)."""
+    return frozenset(FO_UNDERLYING_OPTIONS)
 
 
 def mock_engine_default_underlyings() -> list[str]:
-    """Default scan order: three indices first, then Nifty 50 (no duplicates)."""
+    """Default scan order: ``FO_UNDERLYING_OPTIONS`` order, de-duplicated."""
     seen: set[str] = set()
     out: list[str] = []
-    for u in list(FO_INDEX_UNDERLYING_KEYS) + list(NIFTY50_SYMBOLS):
+    for u in list(FO_UNDERLYING_OPTIONS):
         ux = u.upper().strip()
         if ux not in seen:
             seen.add(ux)
@@ -117,8 +117,8 @@ def mock_engine_default_underlyings() -> list[str]:
 def mock_engine_underlyings() -> list[str]:
     """
     Keys scanned each graph run (envelope on spot 1m), in order.
-    Env ``MOCK_ENGINE_UNDERLYINGS`` = comma-separated subset of index keys and/or Nifty 50 symbols.
-    Default = indices (``FO_INDEX_UNDERLYING_KEYS``) then all ``NIFTY50_SYMBOLS``.
+    Default = ``FO_UNDERLYING_OPTIONS`` in ``trade_claw.constants`` (shared with the F&O Options page).
+    Env ``MOCK_ENGINE_UNDERLYINGS`` = comma-separated subset of those symbols (unknown keys ignored).
     """
     allowed = mock_engine_allowed_underlyings()
     raw = (os.environ.get("MOCK_ENGINE_UNDERLYINGS") or "").strip()
