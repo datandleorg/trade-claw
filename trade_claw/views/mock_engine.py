@@ -577,7 +577,7 @@ def render_mock_engine(kite):
     st.caption(
         "Celery Beat runs `scan_mock_market` **every minute** (IST weekdays, ~09:15–15:19 entries; 15:20 square-off). "
         "Default underlyings: **3 indices + all Nifty 50 stocks** (override with `MOCK_ENGINE_UNDERLYINGS`). "
-        "Live tab **auto-refreshes every 10 seconds**. **At most one OPEN mock trade per underlying.**"
+        "Live tab **auto-refreshes every minute**. **At most one OPEN mock trade per underlying.**"
     )
     st.markdown(f"| DB path | `{MOCK_TRADES_DB_PATH}` |")
     _br1, _br2, _br3 = st.columns([1, 1, 2])
@@ -612,7 +612,7 @@ def render_mock_engine(kite):
     session_d = _session_date_today_ist()
     env_pct = mock_agent_envelope_pct()
 
-    @st.fragment(run_every=timedelta(seconds=10))
+    @st.fragment(run_every=timedelta(minutes=1))
     def _hud():
         mock_trade_store.init_db()
         mock_engine_telemetry.init_telemetry_table()
@@ -630,7 +630,7 @@ def render_mock_engine(kite):
 
         st.subheader("Live summary")
         st.caption(
-            "Auto-refresh: **every 10 seconds** (Kite + SQLite). Worker **every minute** on Beat. "
+            "Auto-refresh: **every minute** (Kite + SQLite). Worker **every minute** on Beat. "
             f"**{len(und)}** scrips in scan list."
         )
 
