@@ -18,6 +18,10 @@ server {
     listen [::]:443 ssl;
     server_name $SERVER_NAMES;
 
+    # Docker embedded DNS — re-resolve streamlit after container recreate (avoids stale upstream IP).
+    resolver 127.0.0.11 ipv6=off valid=10s;
+    resolver_timeout 5s;
+
     ssl_certificate /etc/letsencrypt/live/$PRIMARY_DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$PRIMARY_DOMAIN/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -26,7 +30,8 @@ server {
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
     location / {
-        proxy_pass http://streamlit:8501;
+        set $streamlit_upstream streamlit;
+        proxy_pass http://$streamlit_upstream:8501;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";

@@ -30,6 +30,7 @@ services:
       --server.address 0.0.0.0
       --server.port 8501
       --server.enableCORS=false
+      --server.enableXsrfProtection=false
     restart: unless-stopped
     volumes:
       - trade_claw_app_data:/app/data
@@ -40,6 +41,12 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       KITE_SESSION_FILE: /app/data/.kite_session.json
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
     depends_on:
       redis:
         condition: service_healthy
@@ -100,7 +107,7 @@ services:
     entrypoint: ["/bin/sh", "/docker-entrypoint-custom.sh"]
     depends_on:
       streamlit:
-        condition: service_started
+        condition: service_healthy
 
   certbot:
     image: certbot/certbot:v2.11.0
