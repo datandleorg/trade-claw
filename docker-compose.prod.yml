@@ -33,7 +33,7 @@ services:
       --server.enableXsrfProtection=false
     restart: unless-stopped
     volumes:
-      - ./data:/app/data
+      - trade_claw_app_data:/app/data
     env_file:
       - .env
     environment:
