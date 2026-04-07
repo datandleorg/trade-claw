@@ -242,6 +242,30 @@ def _nse_symbol_quote(kite, nse_key: str) -> tuple[float | None, float | None]:
         return None, None
 
 
+def _pct_change_vs_base(delta: float | None, base: float | None) -> float | None:
+    """Return ``100 * delta / base`` when base is valid (e.g. previous close, entry premium)."""
+    if delta is None or base is None:
+        return None
+    b = float(base)
+    if abs(b) < 1e-12 or b != b:
+        return None
+    return 100.0 * float(delta) / b
+
+
+def _metric_inr_and_pct_desc(
+    delta_inr: float | None,
+    *,
+    pct_base: float | None,
+) -> tuple[float | None, str | None]:
+    """Rounded INR delta for ``st.metric`` and optional ``delta_description`` for % vs base."""
+    if delta_inr is None:
+        return None, None
+    d_round = round(float(delta_inr), 2)
+    pct = _pct_change_vs_base(delta_inr, pct_base)
+    desc = f"{round(pct, 2):+.2f}%" if pct is not None else None
+    return d_round, desc
+
+
 def _safe_key_fragment(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", s)[:48] or "x"
 
@@ -907,20 +931,25 @@ def render_mock_engine(kite):
                     ep0 = float(open_rows[0].entry_price or 0)
                     leg_delta = (live_opt - ep0) if ep0 else None
                     if leg_delta is not None:
+                        d_r, pct_s = _metric_inr_and_pct_desc(leg_delta, pct_base=ep0)
                         st.metric(
                             "Option LTP",
                             f"₹{live_opt:,.2f}",
-                            delta=leg_delta,
+                            delta=d_r,
                             delta_color="normal",
-                            help="Premium change vs entry (₹). Delta colour uses this signed value.",
+                            delta_description=pct_s,
+                            help="Premium change vs entry (₹ and % of entry).",
                         )
                     elif live_d is not None:
+                        prev_o = (live_opt - live_d) if live_opt is not None else None
+                        d_r, pct_s = _metric_inr_and_pct_desc(live_d, pct_base=prev_o)
                         st.metric(
                             "Option LTP",
                             f"₹{live_opt:,.2f}",
-                            delta=live_d,
+                            delta=d_r,
                             delta_color="normal",
-                            help="Change vs previous close (₹). Delta colour uses this signed value.",
+                            delta_description=pct_s,
+                            help="Change vs option previous close (₹ and %).",
                         )
                     else:
                         st.metric("Option LTP", f"₹{live_opt:,.2f}")
@@ -932,13 +961,15 @@ def render_mock_engine(kite):
                     lp, _dd = _opt_quote(kite, t.instrument)
                     ep = float(t.entry_price or 0)
                     chg_e = (lp - ep) if lp is not None and ep else None
+                    pct_e = _pct_change_vs_base(chg_e, ep) if chg_e is not None else None
                     opt_rows.append(
                         {
                             "trade_id": t.trade_id,
                             "index": t.index_underlying or "—",
                             "instrument": t.instrument or "—",
                             "LTP": f"₹{lp:,.2f}" if lp is not None else "—",
-                            "vs_entry": chg_e,
+                            "vs_entry": round(chg_e, 2) if chg_e is not None else None,
+                            "vs_entry_%": round(pct_e, 2) if pct_e is not None else None,
                         }
                     )
                 df_leg = pd.DataFrame(opt_rows)
@@ -957,8 +988,12 @@ def render_mock_engine(kite):
                     return out
 
                 sty_leg = (
-                    df_leg.style.format({"vs_entry": "₹{:+,.2f}"}, na_rep="—")
+                    df_leg.style.format(
+                        {"vs_entry": "₹{:+,.2f}", "vs_entry_%": "{:+.2f}%"},
+                        na_rep="—",
+                    )
                     .apply(_leg_chg_color, subset=["vs_entry"])
+                    .apply(_leg_chg_color, subset=["vs_entry_%"])
                 )
                 st.dataframe(sty_leg, use_container_width=True, hide_index=True)
             if len(open_rows) > 8:
@@ -1022,12 +1057,15 @@ def render_mock_engine(kite):
             with oc6:
                 ep_r = float(r.entry_price or 0)
                 if leg_ltp is not None and ep_r:
+                    dv = leg_ltp - ep_r
+                    d_r, pct_s = _metric_inr_and_pct_desc(dv, pct_base=ep_r)
                     st.metric(
                         "Option LTP",
                         f"₹{leg_ltp:,.2f}",
-                        delta=leg_ltp - ep_r,
+                        delta=d_r,
                         delta_color="normal",
-                        help="Premium change vs entry (₹).",
+                        delta_description=pct_s,
+                        help="Premium change vs entry (₹ and % of entry).",
                     )
                 elif leg_ltp is not None:
                     st.metric("Option LTP", f"₹{leg_ltp:,.2f}")
@@ -1089,13 +1127,16 @@ def render_mock_engine(kite):
                     st.markdown(f"##### {idx_label} · `{u}`")
                     _lv, _d = _nse_underlying_quote(kite, u)
                     _fmt = f"₹{_lv:,.2f}" if _lv is not None else "—"
-                    if _d is not None:
+                    if _d is not None and _lv is not None:
+                        prev_s = _lv - _d
+                        d_r, pct_s = _metric_inr_and_pct_desc(_d, pct_base=prev_s)
                         st.metric(
                             "Spot LTP",
                             _fmt,
-                            delta=_d,
+                            delta=d_r,
                             delta_color="normal",
-                            help="Change vs previous close (₹). Delta colour uses this signed value.",
+                            delta_description=pct_s,
+                            help="Change vs previous close (₹ and %).",
                         )
                     else:
                         st.metric("Spot LTP", _fmt)
@@ -1114,30 +1155,36 @@ def render_mock_engine(kite):
                                 m1, m2, m3 = st.columns(3)
                                 with m1:
                                     d_ema = spot_last - ema_v
+                                    d_r, pct_s = _metric_inr_and_pct_desc(d_ema, pct_base=ema_v)
                                     st.metric(
                                         "EMA20",
                                         f"₹{ema_v:,.2f}",
-                                        delta=d_ema,
+                                        delta=d_r,
                                         delta_color="off",
-                                        help="Spot last close minus EMA20 (₹).",
+                                        delta_description=pct_s,
+                                        help="Spot last close minus EMA20 (₹ and % of EMA).",
                                     )
                                 with m2:
                                     d_u = spot_last - up_v
+                                    d_r, pct_s = _metric_inr_and_pct_desc(d_u, pct_base=up_v)
                                     st.metric(
                                         f"Upper +{100 * env_pct:.1f}%",
                                         f"₹{up_v:,.2f}",
-                                        delta=d_u,
+                                        delta=d_r,
                                         delta_color="off",
-                                        help="Spot minus upper envelope (₹).",
+                                        delta_description=pct_s,
+                                        help="Spot minus upper band (₹ and % of band level).",
                                     )
                                 with m3:
                                     d_l = spot_last - lo_v
+                                    d_r, pct_s = _metric_inr_and_pct_desc(d_l, pct_base=lo_v)
                                     st.metric(
                                         f"Lower −{100 * env_pct:.1f}%",
                                         f"₹{lo_v:,.2f}",
-                                        delta=d_l,
+                                        delta=d_r,
                                         delta_color="off",
-                                        help="Spot minus lower envelope (₹).",
+                                        delta_description=pct_s,
+                                        help="Spot minus lower band (₹ and % of band level).",
                                     )
                         fig_u, dual_panel = _mock_index_spot_figure(
                             df_u, idx_label, env_pct, ema_period=ENVELOPE_EMA_PERIOD
