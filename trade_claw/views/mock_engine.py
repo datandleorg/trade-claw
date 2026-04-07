@@ -910,15 +910,17 @@ def render_mock_engine(kite):
                         st.metric(
                             "Option LTP",
                             f"₹{live_opt:,.2f}",
-                            delta=f"₹{leg_delta:+,.2f} vs entry",
+                            delta=leg_delta,
                             delta_color="normal",
+                            help="Premium change vs entry (₹). Delta colour uses this signed value.",
                         )
                     elif live_d is not None:
                         st.metric(
                             "Option LTP",
                             f"₹{live_opt:,.2f}",
-                            delta=f"₹{live_d:+,.2f} day",
+                            delta=live_d,
                             delta_color="normal",
+                            help="Change vs previous close (₹). Delta colour uses this signed value.",
                         )
                     else:
                         st.metric("Option LTP", f"₹{live_opt:,.2f}")
@@ -1023,8 +1025,9 @@ def render_mock_engine(kite):
                     st.metric(
                         "Option LTP",
                         f"₹{leg_ltp:,.2f}",
-                        delta=f"₹{leg_ltp - ep_r:+,.2f} vs entry",
+                        delta=leg_ltp - ep_r,
                         delta_color="normal",
+                        help="Premium change vs entry (₹).",
                     )
                 elif leg_ltp is not None:
                     st.metric("Option LTP", f"₹{leg_ltp:,.2f}")
@@ -1087,7 +1090,13 @@ def render_mock_engine(kite):
                     _lv, _d = _nse_underlying_quote(kite, u)
                     _fmt = f"₹{_lv:,.2f}" if _lv is not None else "—"
                     if _d is not None:
-                        st.metric("Spot LTP", _fmt, delta=f"₹{_d:+,.2f}", delta_color="normal")
+                        st.metric(
+                            "Spot LTP",
+                            _fmt,
+                            delta=_d,
+                            delta_color="normal",
+                            help="Change vs previous close (₹). Delta colour uses this signed value.",
+                        )
                     else:
                         st.metric("Spot LTP", _fmt)
 
@@ -1108,24 +1117,27 @@ def render_mock_engine(kite):
                                     st.metric(
                                         "EMA20",
                                         f"₹{ema_v:,.2f}",
-                                        delta=f"₹{d_ema:+,.2f}",
-                                        delta_color="normal",
+                                        delta=d_ema,
+                                        delta_color="off",
+                                        help="Spot last close minus EMA20 (₹).",
                                     )
                                 with m2:
                                     d_u = spot_last - up_v
                                     st.metric(
                                         f"Upper +{100 * env_pct:.1f}%",
                                         f"₹{up_v:,.2f}",
-                                        delta=f"₹{d_u:+,.2f}",
-                                        delta_color="normal",
+                                        delta=d_u,
+                                        delta_color="off",
+                                        help="Spot minus upper envelope (₹).",
                                     )
                                 with m3:
                                     d_l = spot_last - lo_v
                                     st.metric(
                                         f"Lower −{100 * env_pct:.1f}%",
                                         f"₹{lo_v:,.2f}",
-                                        delta=f"₹{d_l:+,.2f}",
-                                        delta_color="normal",
+                                        delta=d_l,
+                                        delta_color="off",
+                                        help="Spot minus lower envelope (₹).",
                                     )
                         fig_u, dual_panel = _mock_index_spot_figure(
                             df_u, idx_label, env_pct, ema_period=ENVELOPE_EMA_PERIOD
