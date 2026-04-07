@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import os
 
-from trade_claw.constants import FO_ENVELOPE_BANDWIDTH_MAX_PCT, FO_ENVELOPE_BANDWIDTH_MIN_PCT
+from trade_claw.constants import (
+    FO_BREAKOUT_PENETRATION_DEFAULT_PCT,
+    FO_ENVELOPE_BANDWIDTH_MAX_PCT,
+    FO_ENVELOPE_BANDWIDTH_MIN_PCT,
+)
 
 _DEFAULT_MOCK_AGENT_ENVELOPE_DECIMAL = 0.25
 _DEFAULT_INTRADAY_ENVELOPE_DECIMAL = 0.0030
@@ -133,6 +137,27 @@ def mock_engine_breakout_clear_pct() -> float:
         except ValueError:
             pass
     return float(_DEFAULT_MOCK_ENGINE_BREAKOUT_CLEAR_PCT)
+
+
+def fo_breakout_penetration_min_frac() -> float:
+    """
+    Mock engine / F&O: min fraction [0, 1] of the breakout bar’s **high−low** that must lie past the band
+    (same geometry as the F&O penetration slider). ``0`` = off.
+
+    Env ``FO_BREAKOUT_PENETRATION_MIN_PCT`` or ``fo_breakout_penetration_min_pct``: whole-number percent **0–100**.
+    If **unset**, uses :data:`trade_claw.constants.FO_BREAKOUT_PENETRATION_DEFAULT_PCT` (same default as the UI).
+    """
+    raw = (
+        (os.environ.get("FO_BREAKOUT_PENETRATION_MIN_PCT") or "").strip()
+        or (os.environ.get("fo_breakout_penetration_min_pct") or "").strip()
+    )
+    if not raw:
+        return float(max(0.0, min(1.0, FO_BREAKOUT_PENETRATION_DEFAULT_PCT / 100.0)))
+    try:
+        v = float(raw)
+        return float(max(0.0, min(1.0, v / 100.0)))
+    except ValueError:
+        return float(max(0.0, min(1.0, FO_BREAKOUT_PENETRATION_DEFAULT_PCT / 100.0)))
 
 
 def _env_int(name: str, default: int = 0) -> int:

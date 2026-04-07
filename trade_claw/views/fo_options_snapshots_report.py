@@ -11,6 +11,12 @@ import streamlit as st
 
 from trade_claw.constants import ENVELOPE_EMA_PERIOD
 from trade_claw.fo_options_persist import list_fo_options_snapshot_paths, load_fo_options_snapshot
+from trade_claw.plotly_ohlc import (
+    add_candlestick_trace,
+    add_volume_bar_trace,
+    create_ohlc_volume_figure,
+    finalize_ohlc_volume_figure,
+)
 from trade_claw.pl_style import pl_title_color
 from trade_claw.strategies import add_ma_ema_line_traces, add_ma_envelope_line_traces
 
@@ -452,23 +458,30 @@ def render_fo_options_snapshots_report(kite) -> None:
                 with cleft:
                     if df_u is not None and not df_u.empty:
                         st.markdown("**Underlying**")
-                        fig_u = go.Figure()
-                        fig_u.add_trace(
-                            go.Candlestick(
-                                x=df_u["date"],
-                                open=df_u["open"],
-                                high=df_u["high"],
-                                low=df_u["low"],
-                                close=df_u["close"],
-                                name="Underlying",
-                            )
+                        fig_u, pr_u, vr_u = create_ohlc_volume_figure(df_u)
+                        add_candlestick_trace(
+                            fig_u, df_u, name="Underlying", price_row=pr_u, volume_row=vr_u
                         )
                         if env:
-                            add_ma_envelope_line_traces(fig_u, df_u, ema_period=ENVELOPE_EMA_PERIOD, pct=epct)
+                            add_ma_envelope_line_traces(
+                                fig_u,
+                                df_u,
+                                ema_period=ENVELOPE_EMA_PERIOD,
+                                pct=epct,
+                                row=pr_u if vr_u is not None else None,
+                                col=1 if vr_u is not None else None,
+                            )
                             utitle = "Underlying + envelope"
                         else:
-                            add_ma_ema_line_traces(fig_u, df_u)
+                            add_ma_ema_line_traces(
+                                fig_u,
+                                df_u,
+                                row=pr_u if vr_u is not None else None,
+                                col=1 if vr_u is not None else None,
+                            )
                             utitle = f"Underlying (EMA {p.get('ma_ema_fast')}/{p.get('ma_ema_slow')})"
+                        if vr_u is not None:
+                            add_volume_bar_trace(fig_u, df_u, volume_row=vr_u)
                         ei = ctx.get("entry_bar_idx")
                         if ei is not None and str(ctx.get("Signal", "")).strip() in ("BUY", "SELL"):
                             try:
@@ -476,23 +489,26 @@ def render_fo_options_snapshots_report(kite) -> None:
                                 sig_m = str(ctx.get("Signal"))
                                 du = df_u["date"]
                                 if 0 <= ei < len(du):
-                                    fig_u.add_trace(
-                                        go.Scatter(
-                                            x=[du.iloc[ei]],
-                                            y=[float(df_u.iloc[ei]["close"])],
-                                            mode="markers",
-                                            marker=dict(
-                                                symbol="triangle-up" if sig_m == "BUY" else "triangle-down",
-                                                size=12,
-                                                color="lime" if sig_m == "BUY" else "tomato",
-                                                line=dict(width=1, color="black"),
-                                            ),
-                                            name=sig_m,
-                                        )
+                                    _um = dict(
+                                        x=[du.iloc[ei]],
+                                        y=[float(df_u.iloc[ei]["close"])],
+                                        mode="markers",
+                                        marker=dict(
+                                            symbol="triangle-up" if sig_m == "BUY" else "triangle-down",
+                                            size=12,
+                                            color="lime" if sig_m == "BUY" else "tomato",
+                                            line=dict(width=1, color="black"),
+                                        ),
+                                        name=sig_m,
                                     )
+                                    if vr_u is not None:
+                                        fig_u.add_trace(go.Scatter(**_um), row=pr_u, col=1)
+                                    else:
+                                        fig_u.add_trace(go.Scatter(**_um))
                             except (TypeError, ValueError, IndexError):
                                 pass
-                        fig_u.update_layout(title=utitle, height=360, xaxis_rangeslider_visible=False)
+                        finalize_ohlc_volume_figure(fig_u, height=380)
+                        fig_u.update_layout(title=utitle)
                         st.plotly_chart(fig_u, use_container_width=True)
                     else:
                         st.info("No underlying OHLC in snapshot.")
@@ -501,17 +517,12 @@ def render_fo_options_snapshots_report(kite) -> None:
                     if df_o is not None and not df_o.empty:
                         st.markdown("**Option premium**")
                         opt_name = str(ctx.get("Option") or "Option")
-                        fig_o = go.Figure()
-                        fig_o.add_trace(
-                            go.Candlestick(
-                                x=df_o["date"],
-                                open=df_o["open"],
-                                high=df_o["high"],
-                                low=df_o["low"],
-                                close=df_o["close"],
-                                name=opt_name[:40],
-                            )
+                        fig_o, pr_o, vr_o = create_ohlc_volume_figure(df_o)
+                        add_candlestick_trace(
+                            fig_o, df_o, name=opt_name[:40], price_row=pr_o, volume_row=vr_o
                         )
+                        if vr_o is not None:
+                            add_volume_bar_trace(fig_o, df_o, volume_row=vr_o)
                         oei = ctx.get("opt_entry_idx")
                         oxi = ctx.get("exit_bar_idx")
                         ddt = df_o["date"]
@@ -521,34 +532,39 @@ def render_fo_options_snapshots_report(kite) -> None:
                             try:
                                 oei = int(oei)
                                 if 0 <= oei < len(ddt):
-                                    fig_o.add_trace(
-                                        go.Scatter(
-                                            x=[ddt.iloc[oei]],
-                                            y=[float(ent)],
-                                            mode="markers",
-                                            marker=dict(symbol="triangle-up", size=11, color="cyan", line=dict(width=1, color="black")),
-                                            name="Entry",
-                                        )
+                                    _em = dict(
+                                        x=[ddt.iloc[oei]],
+                                        y=[float(ent)],
+                                        mode="markers",
+                                        marker=dict(symbol="triangle-up", size=11, color="cyan", line=dict(width=1, color="black")),
+                                        name="Entry",
                                     )
+                                    if vr_o is not None:
+                                        fig_o.add_trace(go.Scatter(**_em), row=pr_o, col=1)
+                                    else:
+                                        fig_o.add_trace(go.Scatter(**_em))
                             except (TypeError, ValueError, IndexError):
                                 pass
                         if oxi is not None and exv is not None:
                             try:
                                 oxi = int(oxi)
                                 if 0 <= oxi < len(ddt):
-                                    fig_o.add_trace(
-                                        go.Scatter(
-                                            x=[ddt.iloc[oxi]],
-                                            y=[float(exv)],
-                                            mode="markers",
-                                            marker=dict(symbol="diamond", size=10, color="gold", line=dict(width=1, color="orange")),
-                                            name="Exit",
-                                        )
+                                    _xm = dict(
+                                        x=[ddt.iloc[oxi]],
+                                        y=[float(exv)],
+                                        mode="markers",
+                                        marker=dict(symbol="diamond", size=10, color="gold", line=dict(width=1, color="orange")),
+                                        name="Exit",
                                     )
+                                    if vr_o is not None:
+                                        fig_o.add_trace(go.Scatter(**_xm), row=pr_o, col=1)
+                                    else:
+                                        fig_o.add_trace(go.Scatter(**_xm))
                             except (TypeError, ValueError, IndexError):
                                 pass
                         tp = ctx.get("Target prem.")
                         sp = ctx.get("Stop prem.")
+                        _ohl = dict(row=pr_o, col=1) if vr_o is not None else {}
                         if tp is not None:
                             try:
                                 fig_o.add_hline(
@@ -557,6 +573,7 @@ def render_fo_options_snapshots_report(kite) -> None:
                                     line_color="rgba(34,197,94,0.85)",
                                     annotation_text="Target",
                                     annotation_position="right",
+                                    **_ohl,
                                 )
                             except (TypeError, ValueError):
                                 pass
@@ -568,6 +585,7 @@ def render_fo_options_snapshots_report(kite) -> None:
                                     line_color="rgba(239,68,68,0.85)",
                                     annotation_text="Stop",
                                     annotation_position="right",
+                                    **_ohl,
                                 )
                             except (TypeError, ValueError):
                                 pass
@@ -575,13 +593,12 @@ def render_fo_options_snapshots_report(kite) -> None:
                             net = float(ctx.get("P/L") or 0.0)
                         except (TypeError, ValueError):
                             net = 0.0
+                        finalize_ohlc_volume_figure(fig_o, height=380)
                         fig_o.update_layout(
                             title=dict(
                                 text=f"{opt_name[:48]} · Net ₹{net:+,.2f} · {ctx.get('Closed at', '—')}",
                                 font=dict(color=pl_title_color(net), size=12),
                             ),
-                            height=360,
-                            xaxis_rangeslider_visible=False,
                         )
                         st.plotly_chart(fig_o, use_container_width=True)
                     else:

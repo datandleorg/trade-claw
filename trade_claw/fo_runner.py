@@ -42,6 +42,7 @@ def run_fo_underlying_one_day(
     min_session_bars: int = REPORTS_MIN_BARS_PER_DAY,
     option_target_pct: float | None = None,
     option_stop_loss_pct: float | None = None,
+    min_breakout_penetration_frac: float = 0.0,
 ) -> dict:
     """
     Run full F&O mock pipeline for one calendar session day and one underlying.
@@ -120,7 +121,12 @@ def run_fo_underlying_one_day(
         })
 
     if strategy_is_envelope:
-        ok, text, sig = _ma_envelope_analysis(df_u, ema_period=ENVELOPE_EMA_PERIOD, pct=envelope_pct)
+        ok, text, sig = _ma_envelope_analysis(
+            df_u,
+            ema_period=ENVELOPE_EMA_PERIOD,
+            pct=envelope_pct,
+            min_breakout_penetration_frac=min_breakout_penetration_frac,
+        )
         strat_label = "Envelope → option"
     else:
         ok, text, sig = _ma_ema_crossover_analysis(df_u, fast_period=MA_EMA_FAST, slow_period=MA_EMA_SLOW)

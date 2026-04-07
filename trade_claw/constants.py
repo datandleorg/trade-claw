@@ -26,6 +26,8 @@ FO_ENVELOPE_BANDWIDTH_MIN_PCT = 0.0
 # Max 30% allows mock-agent default (25% / side) to fit the slider when synced from ``MOCK_AGENT_ENVELOPE_PCT``.
 FO_ENVELOPE_BANDWIDTH_MAX_PCT = 30.0
 FO_ENVELOPE_BANDWIDTH_STEP = 0.05
+# F&O envelope: default min % of candle range past band (first close-cross bar only; 0 = off)
+FO_BREAKOUT_PENETRATION_DEFAULT_PCT = 50.0
 # F&O page strategy dropdown (underlying signal → long CE / long PE)
 FO_STRATEGY_ENVELOPE = "MA envelope (EMA ± bandwidth)"
 FO_STRATEGY_MA_CROSS = "MA (EMA crossover)"

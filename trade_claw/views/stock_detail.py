@@ -6,6 +6,12 @@ import streamlit as st
 
 from trade_claw.constants import DEFAULT_INTERVALS, NSE_EXCHANGE
 from trade_claw.market_data import candles_to_dataframe, get_instrument_token
+from trade_claw.plotly_ohlc import (
+    add_candlestick_trace,
+    add_volume_bar_trace,
+    create_ohlc_volume_figure,
+    finalize_ohlc_volume_figure,
+)
 from trade_claw.strategies import get_applicable_strategies
 
 
@@ -80,24 +86,16 @@ def render_stock_detail(kite, selected_symbol: str):
     col5.metric("Candles", n_candles)
     st.caption(f"Date range: {date_range}")
 
-    fig = go.Figure()
-    fig.add_trace(
-        go.Candlestick(
-            x=df["date"],
-            open=df["open"],
-            high=df["high"],
-            low=df["low"],
-            close=df["close"],
-            name="OHLC",
-        )
-    )
-    fig.update_layout(
-        title=f"{selected_symbol} – {interval}",
-        xaxis_title="Date",
-        yaxis_title="Price (₹)",
-        xaxis_rangeslider_visible=False,
-        height=500,
-    )
+    fig, pr, vr = create_ohlc_volume_figure(df)
+    add_candlestick_trace(fig, df, name="OHLC", price_row=pr, volume_row=vr)
+    if vr is not None:
+        add_volume_bar_trace(fig, df, volume_row=vr)
+    finalize_ohlc_volume_figure(fig, height=560)
+    fig.update_layout(title=f"{selected_symbol} – {interval}", xaxis_title="Date")
+    if vr is not None:
+        fig.update_yaxes(title_text="Price (₹)", row=1, col=1)
+    else:
+        fig.update_layout(yaxis_title="Price (₹)")
     st.plotly_chart(fig, use_container_width=True)
 
     with st.expander("Recent candles"):

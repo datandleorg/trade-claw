@@ -12,6 +12,7 @@ from trade_claw.constants import (
     DEFAULT_INTRADAY_INTERVAL,
     ENVELOPE_EMA_PERIOD,
     FO_BROKERAGE_PER_LOT_RT_DEFAULT,
+    FO_BREAKOUT_PENETRATION_DEFAULT_PCT,
     FO_CLOSED_AT_REALISED,
     FO_DEFAULT_UNDERLYINGS,
     FO_INDEX_UNDERLYING_KEYS,
@@ -40,6 +41,12 @@ from trade_claw.mock_market_signal import (
     fo_options_default_option_stop_loss_pct_ui,
     fo_options_default_option_target_pct_ui,
     mock_agent_envelope_pct,
+)
+from trade_claw.plotly_ohlc import (
+    add_candlestick_trace,
+    add_volume_bar_trace,
+    create_ohlc_volume_figure,
+    finalize_ohlc_volume_figure,
 )
 from trade_claw.pl_style import pl_markdown, pl_title_color, style_pl_dataframe
 from trade_claw.strategies import add_ma_ema_line_traces, add_ma_envelope_line_traces
@@ -171,6 +178,7 @@ def _fo_sync_slider_session_from_env_defaults() -> None:
     ss["fo_envelope_bandwidth_pct"] = float(round(fo_options_default_envelope_bandwidth_pct(), 4))
     ss["fo_option_target_pct_ui"] = float(fo_options_default_option_target_pct_ui())
     ss["fo_option_stop_loss_pct_ui"] = float(fo_options_default_option_stop_loss_pct_ui())
+    ss.setdefault("fo_breakout_penetration_min_pct", float(FO_BREAKOUT_PENETRATION_DEFAULT_PCT))
 
 
 def _fo_run_context(kite, nse, nfo, symbol_to_name: dict) -> dict:
@@ -183,9 +191,15 @@ def _fo_run_context(kite, nse, nfo, symbol_to_name: dict) -> dict:
     if strategy_is_envelope:
         envelope_bw_pct = float(ss["fo_envelope_bandwidth_pct"])
         envelope_pct = envelope_bw_pct / 100.0
+        breakout_pen_min_pct_ui = float(
+            ss.get("fo_breakout_penetration_min_pct", FO_BREAKOUT_PENETRATION_DEFAULT_PCT)
+        )
+        min_breakout_penetration_frac = breakout_pen_min_pct_ui / 100.0
     else:
         envelope_pct = mock_agent_envelope_pct()
         envelope_bw_pct = float(round(100 * envelope_pct, 4))
+        breakout_pen_min_pct_ui = 0.0
+        min_breakout_penetration_frac = 0.0
     brokerage = float(ss["fo_brokerage_per_lot"])
     taxes = float(ss["fo_taxes_per_lot"])
     option_target_pct_ui = float(ss["fo_option_target_pct_ui"])
@@ -213,6 +227,7 @@ def _fo_run_context(kite, nse, nfo, symbol_to_name: dict) -> dict:
         "taxes_per_lot_rt": taxes,
         "option_stop_loss_pct": option_stop_loss_pct,
         "option_target_pct": option_target_pct,
+        "min_breakout_penetration_frac": min_breakout_penetration_frac,
     }
     return {
         "common_kw": common_kw,
@@ -227,6 +242,7 @@ def _fo_run_context(kite, nse, nfo, symbol_to_name: dict) -> dict:
         "option_stop_loss_pct": option_stop_loss_pct,
         "option_target_pct_ui": option_target_pct_ui,
         "option_stop_loss_pct_ui": option_stop_loss_pct_ui,
+        "breakout_penetration_min_pct_ui": breakout_pen_min_pct_ui,
     }
 
 
@@ -280,6 +296,7 @@ def _fo_run_selected_once(ctx: dict) -> tuple[list[dict], list, dict, dict, str]
         "strike_policy_label": ctx["common_kw"]["strike_policy_label"],
         "steps_from_atm": ctx["common_kw"]["steps_from_atm"],
         "manual_strike_val": ctx["common_kw"]["manual_strike_val"],
+        "breakout_penetration_min_pct_ui": ctx["breakout_penetration_min_pct_ui"],
     }
     fp_now = fingerprint_params(run_params)
     return rows_out, trade_rows, metrics, run_params, fp_now
@@ -567,21 +584,29 @@ def _fo_expander_charts_single_row(
             else:
                 st.markdown("**Underlying + EMA crossover**")
                 spot_title = f"Spot (EMA {MA_EMA_FAST}/{MA_EMA_SLOW})"
-            fig_u = go.Figure()
-            fig_u.add_trace(
-                go.Candlestick(
-                    x=df_u["date"],
-                    open=df_u["open"],
-                    high=df_u["high"],
-                    low=df_u["low"],
-                    close=df_u["close"],
-                    name="Underlying",
-                )
+            # Always use price + volume strip on this page (volume 0 if column missing / index feed).
+            fig_u, _pr_u, vr_u = create_ohlc_volume_figure(df_u, include_volume=True)
+            add_candlestick_trace(
+                fig_u, df_u, name="Underlying", price_row=_pr_u, volume_row=vr_u
             )
             if sk_render == "envelope":
-                add_ma_envelope_line_traces(fig_u, df_u, ema_period=ENVELOPE_EMA_PERIOD, pct=envelope_pct)
+                add_ma_envelope_line_traces(
+                    fig_u,
+                    df_u,
+                    ema_period=ENVELOPE_EMA_PERIOD,
+                    pct=envelope_pct,
+                    row=_pr_u if vr_u is not None else None,
+                    col=1 if vr_u is not None else None,
+                )
             else:
-                add_ma_ema_line_traces(fig_u, df_u)
+                add_ma_ema_line_traces(
+                    fig_u,
+                    df_u,
+                    row=_pr_u if vr_u is not None else None,
+                    col=1 if vr_u is not None else None,
+                )
+            if vr_u is not None:
+                add_volume_bar_trace(fig_u, df_u, volume_row=vr_u)
             _ei_raw = (t.get("entry_bar_idx") if t else None) or r.get("_chart_entry_bar_idx")
             try:
                 ei = int(_ei_raw) if _ei_raw is not None else None
@@ -590,63 +615,61 @@ def _fo_expander_charts_single_row(
             sig_m = (t.get("Signal") if t else None) or r.get("_chart_spot_signal")
             du = df_u["date"]
             if ei is not None and sig_m in ("BUY", "SELL") and 0 <= ei < len(du):
-                fig_u.add_trace(
-                    go.Scatter(
-                        x=[du.iloc[ei]],
-                        y=[float(df_u.iloc[ei]["close"])],
-                        mode="markers",
-                        marker=dict(
-                            symbol="triangle-up" if sig_m == "BUY" else "triangle-down",
-                            size=14,
-                            color="lime" if sig_m == "BUY" else "tomato",
-                            line=dict(width=1, color="black"),
-                        ),
-                        name=sig_m,
-                    )
+                _mk = dict(
+                    x=[du.iloc[ei]],
+                    y=[float(df_u.iloc[ei]["close"])],
+                    mode="markers",
+                    marker=dict(
+                        symbol="triangle-up" if sig_m == "BUY" else "triangle-down",
+                        size=14,
+                        color="lime" if sig_m == "BUY" else "tomato",
+                        line=dict(width=1, color="black"),
+                    ),
+                    name=sig_m,
                 )
-            fig_u.update_layout(
-                title=spot_title,
-                height=320,
-                xaxis_rangeslider_visible=False,
-            )
+                if vr_u is not None:
+                    fig_u.add_trace(go.Scatter(**_mk), row=_pr_u, col=1)
+                else:
+                    fig_u.add_trace(go.Scatter(**_mk))
+            finalize_ohlc_volume_figure(fig_u, height=380)
+            fig_u.update_layout(title=spot_title)
             st.plotly_chart(fig_u, use_container_width=True, key=f"{_kpre}_spot_{_chart_sig}")
         with c2:
             if t and df_o is not None and not df_o.empty:
                 st.markdown("**Option premium (mock exit)**")
-                fig_o = go.Figure()
-                fig_o.add_trace(
-                    go.Candlestick(
-                        x=df_o["date"],
-                        open=df_o["open"],
-                        high=df_o["high"],
-                        low=df_o["low"],
-                        close=df_o["close"],
-                        name=t["Option"],
-                    )
+                fig_o, _pr_o, vr_o = create_ohlc_volume_figure(df_o, include_volume=True)
+                add_candlestick_trace(
+                    fig_o, df_o, name=t["Option"], price_row=_pr_o, volume_row=vr_o
                 )
+                if vr_o is not None:
+                    add_volume_bar_trace(fig_o, df_o, volume_row=vr_o)
                 oei = t.get("opt_entry_idx")
                 oxi = t.get("exit_bar_idx")
                 ddt = df_o["date"]
                 if oei is not None and 0 <= oei < len(ddt):
-                    fig_o.add_trace(
-                        go.Scatter(
-                            x=[ddt.iloc[oei]],
-                            y=[t["Entry"]],
-                            mode="markers",
-                            marker=dict(symbol="triangle-up", size=12, color="cyan", line=dict(width=1, color="black")),
-                            name="Entry",
-                        )
+                    _ek = dict(
+                        x=[ddt.iloc[oei]],
+                        y=[t["Entry"]],
+                        mode="markers",
+                        marker=dict(symbol="triangle-up", size=12, color="cyan", line=dict(width=1, color="black")),
+                        name="Entry",
                     )
+                    if vr_o is not None:
+                        fig_o.add_trace(go.Scatter(**_ek), row=_pr_o, col=1)
+                    else:
+                        fig_o.add_trace(go.Scatter(**_ek))
                 if oxi is not None and 0 <= oxi < len(ddt):
-                    fig_o.add_trace(
-                        go.Scatter(
-                            x=[ddt.iloc[oxi]],
-                            y=[t["Exit"]],
-                            mode="markers",
-                            marker=dict(symbol="diamond", size=10, color="gold", line=dict(width=1, color="orange")),
-                            name="Exit",
-                        )
+                    _xk = dict(
+                        x=[ddt.iloc[oxi]],
+                        y=[t["Exit"]],
+                        mode="markers",
+                        marker=dict(symbol="diamond", size=10, color="gold", line=dict(width=1, color="orange")),
+                        name="Exit",
                     )
+                    if vr_o is not None:
+                        fig_o.add_trace(go.Scatter(**_xk), row=_pr_o, col=1)
+                    else:
+                        fig_o.add_trace(go.Scatter(**_xk))
                 _net = float(t["P/L"])
                 _gross = float(t.get("P/L gross", _net))
                 _txn = float(t.get("Txn cost", 0.0))
@@ -673,6 +696,7 @@ def _fo_expander_charts_single_row(
                     _sp = _ev * (1.0 - float(option_stop_loss_frac))
                 if _sp is None:
                     _sp = t.get("Stop prem.")
+                _hl_kw = dict(row=_pr_o, col=1) if vr_o is not None else {}
                 if _tp is not None and not pd.isna(_tp):
                     fig_o.add_hline(
                         y=float(_tp),
@@ -680,6 +704,7 @@ def _fo_expander_charts_single_row(
                         line_color="rgba(34,197,94,0.85)",
                         annotation_text="Target",
                         annotation_position="right",
+                        **_hl_kw,
                     )
                 _draw_stop = _sp is not None and not pd.isna(_sp)
                 if _draw_stop and option_stop_loss_frac is not None and float(option_stop_loss_frac) <= 0:
@@ -691,7 +716,9 @@ def _fo_expander_charts_single_row(
                         line_color="rgba(239,68,68,0.85)",
                         annotation_text="Stop",
                         annotation_position="right",
+                        **_hl_kw,
                     )
+                finalize_ohlc_volume_figure(fig_o, height=380)
                 fig_o.update_layout(
                     title=dict(
                         text=(
@@ -700,8 +727,6 @@ def _fo_expander_charts_single_row(
                         ),
                         font=dict(color=pl_title_color(_net), size=13),
                     ),
-                    height=320,
-                    xaxis_rangeslider_visible=False,
                 )
                 st.plotly_chart(fig_o, use_container_width=True, key=f"{_kpre}_opt_{_chart_sig}")
             else:
@@ -875,6 +900,19 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
             ),
         )
         envelope_pct = envelope_bw_pct / 100.0
+        st.slider(
+            "Min breakout penetration (% of candle range past band)",
+            min_value=0.0,
+            max_value=100.0,
+            step=1.0,
+            value=float(FO_BREAKOUT_PENETRATION_DEFAULT_PCT),
+            key="fo_breakout_penetration_min_pct",
+            help=(
+                "**0** = off (any valid close cross counts). Otherwise the breakout bar must have at least this "
+                "fraction of its **high−low** range on the far side of the envelope line (above upper for long CE, "
+                "below lower for long PE)."
+            ),
+        )
     else:
         envelope_pct = mock_agent_envelope_pct()
         envelope_bw_pct = float(round(100 * envelope_pct, 4))
@@ -933,9 +971,21 @@ check `trade_claw/fo_support.py` (`_INDEX_NSE_SPOT_CANDIDATES` / `_INDEX_NFO_NAM
     option_target_pct = option_target_pct_ui / 100.0
     option_stop_loss_pct = option_stop_loss_pct_ui / 100.0
 
+    _pen_ui = (
+        float(st.session_state.get("fo_breakout_penetration_min_pct", FO_BREAKOUT_PENETRATION_DEFAULT_PCT))
+        if strategy_is_envelope
+        else 0.0
+    )
+    _pen_caption = (
+        f" Optional **penetration** filter: ≥**{_pen_ui:.0f}%** of the signal candle’s range must lie past the band; **0%** = off."
+        if strategy_is_envelope
+        else ""
+    )
     st.caption(
         "**Envelope:** first **close** above upper / below lower band (not wick-only). "
-        "→ long ATM **CE** / **PE**. **EMA cross:** first golden / death cross in session → **CE** / **PE**. "
+        "→ long ATM **CE** / **PE**."
+        + _pen_caption
+        + " **EMA cross:** first golden / death cross in session → **CE** / **PE**. "
         "No short options. Exit: **target** = premium **+"
         f"{option_target_pct_ui:.1f}%** on bar **high**; **stop** = **−{option_stop_loss_pct_ui:.1f}%** on bar **low** (0% = no stop); else **EOD**. "
         "Mock size: **always 1 lot** per symbol (exchange `lot_size` × premium). "

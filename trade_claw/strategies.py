@@ -185,13 +185,25 @@ def _ma_ema_crossover_analysis(df, fast_period=MA_EMA_FAST, slow_period=MA_EMA_S
     return True, text, sig
 
 
-def add_ma_ema_line_traces(fig, df, fast_period=MA_EMA_FAST, slow_period=MA_EMA_SLOW):
+def add_ma_ema_line_traces(
+    fig,
+    df,
+    fast_period=MA_EMA_FAST,
+    slow_period=MA_EMA_SLOW,
+    *,
+    row: int | None = None,
+    col: int | None = None,
+):
     if df is None or df.empty or len(df) < slow_period:
         return
     close = df["close"]
     x = df["date"]
     ema_fast = close.ewm(span=fast_period, adjust=False).mean()
     ema_slow = close.ewm(span=slow_period, adjust=False).mean()
+    subplot_kw: dict[str, int] = {}
+    if row is not None:
+        subplot_kw["row"] = row
+        subplot_kw["col"] = col if col is not None else 1
     fig.add_trace(
         go.Scatter(
             x=x,
@@ -200,7 +212,8 @@ def add_ma_ema_line_traces(fig, df, fast_period=MA_EMA_FAST, slow_period=MA_EMA_
             name=f"EMA {fast_period}",
             line=dict(color="#00d4ff", width=2),
             opacity=0.95,
-        )
+        ),
+        **subplot_kw,
     )
     fig.add_trace(
         go.Scatter(
@@ -210,7 +223,8 @@ def add_ma_ema_line_traces(fig, df, fast_period=MA_EMA_FAST, slow_period=MA_EMA_
             name=f"EMA {slow_period}",
             line=dict(color="#ff9f1a", width=2),
             opacity=0.95,
-        )
+        ),
+        **subplot_kw,
     )
 
 
@@ -224,13 +238,35 @@ def _envelope_series(df, ema_period=ENVELOPE_EMA_PERIOD, pct=None):
     return center, upper, lower
 
 
-def _ma_envelope_analysis(df, ema_period=ENVELOPE_EMA_PERIOD, pct=None):
+def _envelope_breakout_penetration_frac(high: float, low: float, band: float, direction: str) -> float:
+    """
+    Share of the candle's (high−low) range that lies past ``band`` in the breakout direction
+    (BUY = above upper band, SELL = below lower band). Returns 1.0 when range is non-positive.
+    """
+    if high <= low:
+        return 1.0
+    rng = high - low
+    if direction == "BUY":
+        seg = max(0.0, high - max(low, band))
+    else:
+        seg = max(0.0, min(high, band) - low)
+    return min(1.0, seg / rng)
+
+
+def _ma_envelope_analysis(
+    df,
+    ema_period=ENVELOPE_EMA_PERIOD,
+    pct=None,
+    *,
+    min_breakout_penetration_frac: float = 0.0,
+):
     if pct is None:
         pct = intraday_envelope_decimal()
     empty_sig = {"signal": None, "target": None, "stop": None, "entry_bar_idx": None}
     min_bars = ema_period + 2
     if len(df) < min_bars:
         return False, f"Need at least {min_bars} bars for EMA({ema_period}) envelope.", empty_sig
+    min_pen = float(max(0.0, min(1.0, min_breakout_penetration_frac)))
     close = df["close"]
     center, upper, lower = _envelope_series(df, ema_period, pct)
     events = []
@@ -238,13 +274,21 @@ def _ma_envelope_analysis(df, ema_period=ENVELOPE_EMA_PERIOD, pct=None):
         c, c_prev = float(close.iloc[i]), float(close.iloc[i - 1])
         u, u_prev = float(upper.iloc[i]), float(upper.iloc[i - 1])
         lo, lo_prev = float(lower.iloc[i]), float(lower.iloc[i - 1])
+        row = df.iloc[i]
+        hi = float(row["high"])
+        lw = float(row["low"])
         if c > u and c_prev <= u_prev:
-            events.append((i, "BUY"))
+            if min_pen <= 0 or _envelope_breakout_penetration_frac(hi, lw, u, "BUY") >= min_pen:
+                events.append((i, "BUY"))
         if c < lo and c_prev >= lo_prev:
-            events.append((i, "SELL"))
+            if min_pen <= 0 or _envelope_breakout_penetration_frac(hi, lw, lo, "SELL") >= min_pen:
+                events.append((i, "SELL"))
     if not events:
+        pen_note = ""
+        if min_pen > 0:
+            pen_note = f" (penetration filter ≥ {100 * min_pen:.0f}% of candle range past band)"
         text = (
-            f"EMA({ema_period}) ±{100 * pct:.1f}% envelope: no breakout in session. "
+            f"EMA({ema_period}) ±{100 * pct:.1f}% envelope: no breakout in session{pen_note}. "
             f"Last close ₹{close.iloc[-1]:,.2f}, upper ₹{upper.iloc[-1]:,.2f}, lower ₹{lower.iloc[-1]:,.2f}."
         )
         return False, text, empty_sig

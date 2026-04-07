@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from trade_claw.constants import ENVELOPE_EMA_PERIOD, FO_UNDERLYING_OPTIONS
 from trade_claw.env_trading_params import (
+    fo_breakout_penetration_min_frac,
     fo_options_default_envelope_bandwidth_pct,
     fo_options_default_option_stop_loss_pct_ui,
     fo_options_default_option_target_pct_ui,
@@ -29,7 +30,7 @@ from trade_claw.env_trading_params import (
     option_target_premium_fraction,
 )
 from trade_claw.fo_support import fetch_underlying_intraday, underlying_index_tradingsymbol
-from trade_claw.strategies import _envelope_series
+from trade_claw.strategies import _envelope_breakout_penetration_frac, _envelope_series
 
 IST = ZoneInfo("Asia/Kolkata")
 logger = logging.getLogger(__name__)
@@ -261,8 +262,9 @@ def envelope_breakout_on_last_bar(
     penultimate bar when ``MOCK_ENGINE_BREAKOUT_REQUIRE_CONFIRM_BAR`` is set).
 
     Requires **warmup**: enough bars for EMA, cross, optional strict filters, and optional confirm.
-    Optional **clear break**: ``MOCK_ENGINE_BREAKOUT_CLEAR_PCT``. Strict filters (body, wicks,
-    range expansion, volume, directional body) are env-gated; ``0`` / unset disables each.
+    Optional **penetration** (same geometry as F&O page): ``FO_BREAKOUT_PENETRATION_MIN_PCT`` or ``fo_breakout_penetration_min_pct``
+    (whole **0–100**; **0** = off). If unset, defaults to ``FO_BREAKOUT_PENETRATION_DEFAULT_PCT`` (same as the UI). Optional **clear break**:
+    ``MOCK_ENGINE_BREAKOUT_CLEAR_PCT``. Strict filters (body, wicks, range expansion, volume, directional body) are env-gated; ``0`` / unset disables each.
 
     BUY cross → BULLISH (long CE); SELL cross → BEARISH (long PE).
     """
@@ -317,6 +319,22 @@ def envelope_breakout_on_last_bar(
             f"Close ₹{c:,.2f}, upper ₹{u:,.2f}, lower ₹{lo:,.2f}."
         )
         return False, text, empty
+
+    min_pen = fo_breakout_penetration_min_frac()
+    if min_pen > 0:
+        row_b = df.iloc[i_b]
+        hi = float(row_b["high"])
+        lw = float(row_b["low"])
+        pen_dir = "BUY" if direction == "BULLISH" else "SELL"
+        band_px = u if direction == "BULLISH" else lo
+        pen = _envelope_breakout_penetration_frac(hi, lw, band_px, pen_dir)
+        if pen < min_pen:
+            text = (
+                f"EMA({ema_period}) ±{100 * pct:.2f}%: cross {side} on breakout bar but penetration "
+                f"{100 * pen:.1f}% of candle range past band < required {100 * min_pen:.0f}%. "
+                f"Close ₹{c:,.2f}, upper ₹{u:,.2f}, lower ₹{lo:,.2f}."
+            )
+            return False, text, empty
 
     clear_eps = mock_engine_breakout_clear_pct()
     if clear_eps > 0:

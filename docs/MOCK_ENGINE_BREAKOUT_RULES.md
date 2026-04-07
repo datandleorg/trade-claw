@@ -47,9 +47,22 @@ Otherwise there is **no** signal (no “stale” breakout — only the bar that 
 
 ---
 
-## 3. Clear break past the band (optional)
+## 3. Breakout penetration (optional)
 
-After a raw cross passes, an extra check may require the close to sit **clearly** beyond the band, not only barely through it.
+After the fresh cross is detected on the breakout bar, the engine may require a minimum share of that bar’s **high−low** range to lie **past** the band in the breakout direction (same geometry as the F&O options penetration slider and `strategies._envelope_breakout_penetration_frac`).
+
+| Env | Meaning |
+| :--- | :--- |
+| `FO_BREAKOUT_PENETRATION_MIN_PCT` | Whole-number **0–100** (% of candle range past the line). **`0`** disables. If **unset**, defaults to **`FO_BREAKOUT_PENETRATION_DEFAULT_PCT`** in code (currently **50**, aligned with the UI). |
+| `fo_breakout_penetration_min_pct` | Alias for the same variable (some shells prefer lowercase). |
+
+Reader: `trade_claw.env_trading_params.fo_breakout_penetration_min_frac` (returns a **0–1** fraction). Evaluated **after** the cross, **before** the clear-break check.
+
+---
+
+## 4. Clear break past the band (optional)
+
+After the cross (and optional penetration) pass, an extra check may require the close to sit **clearly** beyond the band, not only barely through it.
 
 - **Bullish**: `(close - upper) / upper ≥ MOCK_ENGINE_BREAKOUT_CLEAR_PCT` (as a fraction of the upper band level; upper is taken in absolute value for the divisor guard).
 - **Bearish**: `(lower - close) / lower ≥ MOCK_ENGINE_BREAKOUT_CLEAR_PCT`.
@@ -64,9 +77,9 @@ If the cross is present but the margin is too small, the function returns **no s
 
 ---
 
-## 4. Strict “clean breakout” filters (optional)
+## 5. Strict “clean breakout” filters (optional)
 
-All of the following are applied **after** the cross and optional clear-break check. Each knob is **disabled** when unset or set to **`0`** (readers in `trade_claw.env_trading_params`).
+All of the following are applied **after** the cross, optional penetration, and optional clear-break check. Each knob is **disabled** when unset or set to **`0`** (readers in `trade_claw.env_trading_params`).
 
 | Env | Meaning |
 | :--- | :--- |
@@ -86,6 +99,7 @@ All of the following are applied **after** the cross and optional clear-break ch
 | :--- | :--- |
 | Warmup bar count | EMA envelope validity + optional confirm / range / volume history |
 | Fresh cross on breakout bar | No signal on old breaks unless that bar completes a new cross |
+| Penetration (unless 0 / disabled) | Require enough of the breakout bar’s range past the band (aligned with F&O UI) |
 | Clear break (unless pct = 0) | Reduce noise from marginal pierces of the band |
 | Strict filters (optional) | Body, wicks, range expansion, volume, directional body, 2-bar confirm |
 

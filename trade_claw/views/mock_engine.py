@@ -32,6 +32,12 @@ from trade_claw.mock_market_signal import (
     nse_index_ltp_symbol,
     now_ist,
 )
+from trade_claw.plotly_ohlc import (
+    add_candlestick_trace,
+    add_volume_bar_trace,
+    create_ohlc_volume_figure,
+    finalize_ohlc_volume_figure,
+)
 from trade_claw.pl_style import pl_title_color
 from trade_claw.strategies import _envelope_series, add_ma_envelope_line_traces
 from trade_claw.task_runtime import MOCK_TRADES_DB_PATH
@@ -89,21 +95,26 @@ def _mock_index_spot_figure(
     *,
     ema_period: int = ENVELOPE_EMA_PERIOD,
 ) -> tuple[go.Figure, bool]:
-    """Spot candles + EMA; when envelope is huge vs session, add a lower panel: % vs EMA with ±pct bands."""
+    """Spot candles + EMA; when envelope is huge vs session, middle panel: % vs EMA; volume on bottom when data exists."""
+    _ROW_PRICE = 1
+    _ROW_PCT = 2
+    _ROW_VOL = 3
+
     axis = _spot_chart_y_axis(df, ema_period=ema_period, pct=env_pct)
     if axis is None or len(df) < ema_period:
-        fig = go.Figure()
-        fig.add_trace(
-            go.Candlestick(
-                x=df["date"],
-                open=df["open"],
-                high=df["high"],
-                low=df["low"],
-                close=df["close"],
-                name=idx_label,
-            )
+        fig, pr, vr = create_ohlc_volume_figure(df)
+        add_candlestick_trace(fig, df, name=idx_label, price_row=pr, volume_row=vr)
+        add_ma_envelope_line_traces(
+            fig,
+            df,
+            ema_period=ema_period,
+            pct=env_pct,
+            row=pr if vr is not None else None,
+            col=1 if vr is not None else None,
         )
-        add_ma_envelope_line_traces(fig, df, ema_period=ema_period, pct=env_pct)
+        if vr is not None:
+            add_volume_bar_trace(fig, df, volume_row=vr)
+        finalize_ohlc_volume_figure(fig, height=400, template="plotly_dark")
         return fig, False
 
     y0, y1, session_zoom = axis
@@ -117,12 +128,16 @@ def _mock_index_spot_figure(
         pct_vs = pct_vs.fillna(0.0)
         xs = df["date"]
         fig = make_subplots(
-            rows=2,
+            rows=3,
             cols=1,
             shared_xaxes=True,
-            vertical_spacing=0.07,
-            row_heights=[0.66, 0.34],
-            subplot_titles=(None, f"% from EMA — dashed lines at ±{pct_label} (same envelope as worker)"),
+            vertical_spacing=0.05,
+            row_heights=[0.48, 0.32, 0.20],
+            subplot_titles=(
+                None,
+                f"% from EMA — dashed lines at ±{pct_label} (same envelope as worker)",
+                None,
+            ),
         )
         fig.add_trace(
             go.Candlestick(
@@ -133,7 +148,7 @@ def _mock_index_spot_figure(
                 close=df["close"],
                 name=idx_label,
             ),
-            row=1,
+            row=_ROW_PRICE,
             col=1,
         )
         add_ma_envelope_line_traces(
@@ -142,7 +157,7 @@ def _mock_index_spot_figure(
             ema_period=ema_period,
             pct=env_pct,
             include_price_bands=False,
-            row=1,
+            row=_ROW_PRICE,
             col=1,
         )
         fig.add_trace(
@@ -154,7 +169,7 @@ def _mock_index_spot_figure(
                 line=dict(color="rgba(0, 220, 130, 0.9)", width=1.5, dash="dash"),
                 hoverinfo="skip",
             ),
-            row=2,
+            row=_ROW_PCT,
             col=1,
         )
         fig.add_trace(
@@ -166,7 +181,7 @@ def _mock_index_spot_figure(
                 line=dict(color="rgba(255, 120, 100, 0.9)", width=1.5, dash="dash"),
                 hoverinfo="skip",
             ),
-            row=2,
+            row=_ROW_PCT,
             col=1,
         )
         fig.add_trace(
@@ -177,43 +192,45 @@ def _mock_index_spot_figure(
                 name="% vs EMA",
                 line=dict(color="#c4b5fd", width=1.5),
             ),
-            row=2,
+            row=_ROW_PCT,
             col=1,
         )
-        fig.update_yaxes(range=[y0, y1], autorange=False, row=1, col=1)
+        add_volume_bar_trace(fig, df, volume_row=_ROW_VOL)
+        fig.update_yaxes(range=[y0, y1], autorange=False, row=_ROW_PRICE, col=1)
         y2_hi = max(float(pct_vs.max()), band_pct, 1.0) * 1.12
         y2_lo = min(float(pct_vs.min()), -band_pct, -1.0) * 1.12
         fig.update_yaxes(
             range=[y2_lo, y2_hi],
             autorange=False,
             title_text="%",
-            row=2,
+            row=_ROW_PCT,
             col=1,
         )
+        fig.update_xaxes(rangeslider_visible=False)
         fig.update_layout(
             template="plotly_dark",
-            xaxis_rangeslider_visible=False,
+            height=520,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
         return fig, True
 
-    fig = go.Figure()
-    fig.add_trace(
-        go.Candlestick(
-            x=df["date"],
-            open=df["open"],
-            high=df["high"],
-            low=df["low"],
-            close=df["close"],
-            name=idx_label,
-        )
+    fig, pr, vr = create_ohlc_volume_figure(df)
+    add_candlestick_trace(fig, df, name=idx_label, price_row=pr, volume_row=vr)
+    add_ma_envelope_line_traces(
+        fig,
+        df,
+        ema_period=ema_period,
+        pct=env_pct,
+        row=pr if vr is not None else None,
+        col=1 if vr is not None else None,
     )
-    add_ma_envelope_line_traces(fig, df, ema_period=ema_period, pct=env_pct)
-    fig.update_layout(
-        yaxis=dict(range=[y0, y1], autorange=False),
-        template="plotly_dark",
-        xaxis_rangeslider_visible=False,
-    )
+    if vr is not None:
+        add_volume_bar_trace(fig, df, volume_row=vr)
+    finalize_ohlc_volume_figure(fig, height=400, template="plotly_dark")
+    if vr is not None:
+        fig.update_yaxes(range=[y0, y1], autorange=False, row=1, col=1)
+    else:
+        fig.update_layout(yaxis=dict(range=[y0, y1], autorange=False))
     return fig, False
 
 
@@ -525,16 +542,19 @@ def _mock_option_strike_display(inst: str) -> str | None:
 def _add_fo_style_option_markers_and_hlines(
     fig: go.Figure,
     dfp: pd.DataFrame,
-    row,
+    trade,
     *,
     entry_idx: int | None,
     exit_idx: int | None,
+    price_row: int | None = None,
+    price_col: int = 1,
 ) -> None:
     """F&O Options–style: entry/exit markers + dashed target/stop (no duplicate entry/exit hlines)."""
     ddt = dfp["date"]
-    _ep = _trade_row_get(row, "entry_price")
+    _sub = {"row": price_row, "col": price_col} if price_row is not None else {}
+    _ep = _trade_row_get(trade, "entry_price")
     ep = float(_ep) if _ep is not None and pd.notna(_ep) else 0.0
-    _xp = _trade_row_get(row, "exit_price")
+    _xp = _trade_row_get(trade, "exit_price")
     xp = float(_xp) if _xp is not None and pd.notna(_xp) else 0.0
     if entry_idx is not None and 0 <= entry_idx < len(ddt) and ep > 0:
         fig.add_trace(
@@ -549,9 +569,10 @@ def _add_fo_style_option_markers_and_hlines(
                     line=dict(width=1, color="black"),
                 ),
                 name="Entry",
-            )
+            ),
+            **_sub,
         )
-    st_cl = str(_trade_row_get(row, "status") or "").upper()
+    st_cl = str(_trade_row_get(trade, "status") or "").upper()
     if (
         exit_idx is not None
         and 0 <= exit_idx < len(ddt)
@@ -570,11 +591,12 @@ def _add_fo_style_option_markers_and_hlines(
                     line=dict(width=1, color="orange"),
                 ),
                 name="Exit",
-            )
+            ),
+            **_sub,
         )
-    _tp = _trade_row_get(row, "target")
+    _tp = _trade_row_get(trade, "target")
     tp = float(_tp) if _tp is not None and pd.notna(_tp) else 0.0
-    _sp = _trade_row_get(row, "stop_loss")
+    _sp = _trade_row_get(trade, "stop_loss")
     sp = float(_sp) if _sp is not None and pd.notna(_sp) else 0.0
     if tp > ep and ep > 0:
         fig.add_hline(
@@ -583,6 +605,7 @@ def _add_fo_style_option_markers_and_hlines(
             line_color="rgba(34,197,94,0.85)",
             annotation_text="Target",
             annotation_position="right",
+            **_sub,
         )
     if 0 < sp < ep:
         fig.add_hline(
@@ -591,6 +614,7 @@ def _add_fo_style_option_markers_and_hlines(
             line_color="rgba(239,68,68,0.85)",
             annotation_text="Stop",
             annotation_position="right",
+            **_sub,
         )
 
 
@@ -769,7 +793,7 @@ def _render_mock_analytics() -> None:
                         title=(
                             f"Trade {tid} — {snap_idx_label} spot (merged, {len(df_um)} bars) + EMA envelope"
                         ),
-                        height=420 if _dual_u else 300,
+                        height=540 if _dual_u else 420,
                     )
                     st.plotly_chart(fig_u, use_container_width=True, key="mock_an_snap_under")
                 except (KeyError, ValueError) as e:
@@ -796,27 +820,24 @@ def _render_mock_analytics() -> None:
                         ent_i = _nearest_bar_idx(dfp, row.get("entry_time"))
                         ex_i = _nearest_bar_idx(dfp, row.get("exit_time"))
                         opt_name = str(row.get("instrument") or "Option")
-                        fig_s = go.Figure(
-                            data=[
-                                go.Candlestick(
-                                    x=dfp["date"],
-                                    open=dfp["open"],
-                                    high=dfp["high"],
-                                    low=dfp["low"],
-                                    close=dfp["close"],
-                                    name=opt_name[:48],
-                                )
-                            ]
+                        fig_s, pr_s, vr_s = create_ohlc_volume_figure(dfp)
+                        add_candlestick_trace(
+                            fig_s, dfp, name=opt_name[:48], price_row=pr_s, volume_row=vr_s
                         )
+                        if vr_s is not None:
+                            add_volume_bar_trace(fig_s, dfp, volume_row=vr_s)
                         _add_fo_style_option_markers_and_hlines(
-                            fig_s, dfp, row, entry_idx=ent_i, exit_idx=ex_i
+                            fig_s,
+                            dfp,
+                            row,
+                            entry_idx=ent_i,
+                            exit_idx=ex_i,
+                            price_row=pr_s if vr_s is not None else None,
                         )
                         t_title, t_col = _mock_analytics_replay_option_title(row, tid)
+                        finalize_ohlc_volume_figure(fig_s, height=400, template="plotly_dark")
                         fig_s.update_layout(
                             title=dict(text=t_title, font=dict(color=t_col, size=13)),
-                            template="plotly_dark",
-                            height=340,
-                            xaxis_rangeslider_visible=False,
                         )
                         st.plotly_chart(fig_s, use_container_width=True, key="mock_an_snap_chart")
                 except (json.JSONDecodeError, KeyError, ValueError) as e:
@@ -1082,20 +1103,20 @@ def render_mock_engine(kite):
             if r.instrument:
                 df_o = _opt_minute_df(kite, nfo, r.instrument, session_d)
                 if df_o is not None and not df_o.empty:
-                    fig_o = go.Figure()
-                    fig_o.add_trace(
-                        go.Candlestick(
-                            x=df_o["date"],
-                            open=df_o["open"],
-                            high=df_o["high"],
-                            low=df_o["low"],
-                            close=df_o["close"],
-                            name=r.instrument,
-                        )
+                    fig_o, pr_o, vr_o = create_ohlc_volume_figure(df_o)
+                    add_candlestick_trace(
+                        fig_o, df_o, name=r.instrument, price_row=pr_o, volume_row=vr_o
                     )
+                    if vr_o is not None:
+                        add_volume_bar_trace(fig_o, df_o, volume_row=vr_o)
                     ent_i = _nearest_bar_idx(df_o, r.entry_time)
                     _add_fo_style_option_markers_and_hlines(
-                        fig_o, df_o, r, entry_idx=ent_i, exit_idx=None
+                        fig_o,
+                        df_o,
+                        r,
+                        entry_idx=ent_i,
+                        exit_idx=None,
+                        price_row=pr_o if vr_o is not None else None,
                     )
                     leg = _mock_option_leg_label(r)
                     inst = r.instrument or "Option"
@@ -1103,14 +1124,12 @@ def render_mock_engine(kite):
                     leg_strike = f"{leg} @{float(sk):,.0f}" if sk else leg
                     up = float(u_pnl) if u_pnl is not None else 0.0
                     live_title = f"{leg_strike} · `{inst}` · Unrealised ₹{up:+,.2f} · OPEN"
+                    finalize_ohlc_volume_figure(fig_o, height=380, template="plotly_dark")
                     fig_o.update_layout(
                         title=dict(
                             text=live_title,
                             font=dict(color=pl_title_color(up), size=13),
                         ),
-                        height=300,
-                        xaxis_rangeslider_visible=False,
-                        template="plotly_dark",
                     )
                     st.plotly_chart(fig_o, use_container_width=True, key=chart_key)
                 else:
@@ -1191,7 +1210,7 @@ def render_mock_engine(kite):
                         )
                         fig_u.update_layout(
                             title=f"{u} spot (1m)",
-                            height=340 if dual_panel else 280,
+                            height=520 if dual_panel else 400,
                         )
                         st.plotly_chart(
                             fig_u,

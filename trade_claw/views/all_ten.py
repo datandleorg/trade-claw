@@ -18,6 +18,12 @@ from trade_claw.constants import (
 )
 from trade_claw.env_trading_params import intraday_envelope_decimal
 from trade_claw.market_data import candles_to_dataframe, get_instrument_token
+from trade_claw.plotly_ohlc import (
+    add_candlestick_trace,
+    add_volume_bar_trace,
+    create_ohlc_volume_figure,
+    finalize_ohlc_volume_figure,
+)
 from trade_claw.pl_style import pl_markdown, pl_title_color, style_pl_dataframe
 from trade_claw.strategies import (
     add_ma_ema_line_traces,
@@ -285,53 +291,59 @@ def render_all_ten(kite):
                 if trade_rows:
                     dates = df["date"]
                     for _idx, t in enumerate(trade_rows):
-                        fig = go.Figure()
-                        fig.add_trace(
-                            go.Candlestick(
-                                x=df["date"],
-                                open=df["open"],
-                                high=df["high"],
-                                low=df["low"],
-                                close=df["close"],
-                                name="OHLC",
-                            )
-                        )
+                        fig, pr, vr = create_ohlc_volume_figure(df)
+                        add_candlestick_trace(fig, df, name="OHLC", price_row=pr, volume_row=vr)
                         if t.get("Strategy") == "MA":
-                            add_ma_ema_line_traces(fig, df)
+                            add_ma_ema_line_traces(
+                                fig,
+                                df,
+                                row=pr if vr is not None else None,
+                                col=1 if vr is not None else None,
+                            )
                         elif t.get("Strategy") == "Envelope":
-                            add_ma_envelope_line_traces(fig, df)
+                            add_ma_envelope_line_traces(
+                                fig,
+                                df,
+                                row=pr if vr is not None else None,
+                                col=1 if vr is not None else None,
+                            )
+                        if vr is not None:
+                            add_volume_bar_trace(fig, df, volume_row=vr)
                         ei = t.get("entry_bar_idx")
                         exi = t.get("exit_bar_idx")
                         if ei is not None and 0 <= ei < len(dates):
                             sym = "triangle-up" if t.get("Signal") == "BUY" else "triangle-down"
                             color = "lime" if t.get("Signal") == "BUY" else "tomato"
-                            fig.add_trace(
-                                go.Scatter(
-                                    x=[dates.iloc[ei]],
-                                    y=[t["Entry"]],
-                                    mode="markers",
-                                    marker=dict(symbol=sym, size=14, color=color, line=dict(width=1, color="black")),
-                                    name=t["Signal"],
-                                )
+                            _em = dict(
+                                x=[dates.iloc[ei]],
+                                y=[t["Entry"]],
+                                mode="markers",
+                                marker=dict(symbol=sym, size=14, color=color, line=dict(width=1, color="black")),
+                                name=t["Signal"],
                             )
+                            if vr is not None:
+                                fig.add_trace(go.Scatter(**_em), row=pr, col=1)
+                            else:
+                                fig.add_trace(go.Scatter(**_em))
                         if exi is not None and 0 <= exi < len(dates):
-                            fig.add_trace(
-                                go.Scatter(
-                                    x=[dates.iloc[exi]],
-                                    y=[t["Exit"]],
-                                    mode="markers",
-                                    marker=dict(symbol="diamond", size=10, color="gold", line=dict(width=1, color="orange")),
-                                    name="Exit",
-                                )
+                            _xm = dict(
+                                x=[dates.iloc[exi]],
+                                y=[t["Exit"]],
+                                mode="markers",
+                                marker=dict(symbol="diamond", size=10, color="gold", line=dict(width=1, color="orange")),
+                                name="Exit",
                             )
+                            if vr is not None:
+                                fig.add_trace(go.Scatter(**_xm), row=pr, col=1)
+                            else:
+                                fig.add_trace(go.Scatter(**_xm))
                         _pl = float(t["P/L"])
+                        finalize_ohlc_volume_figure(fig, height=360)
                         fig.update_layout(
                             title=dict(
                                 text=f"{t['Strategy']} – {t['Signal']} · P/L ₹{_pl:+,.2f}",
                                 font=dict(color=pl_title_color(_pl), size=14),
                             ),
-                            height=300,
-                            xaxis_rangeslider_visible=False,
                         )
                         st.plotly_chart(fig, use_container_width=True)
                 else:
