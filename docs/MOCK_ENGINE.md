@@ -207,7 +207,7 @@ WAL allows concurrent **writer** (Celery) and **reader** (Streamlit).
 
 For **months** of history, analytics are driven only from **`mock_trades`**. Kite does **not** reliably provide **minute** history for **old / expired** option contracts, so do not depend on re-fetching option intraday charts for past trades.
 
-Streamlit **Mock AI engine → Analytics** tab uses [`mock_trade_analytics.py`](trade_claw/mock_trade_analytics.py): IST calendar date range → UTC SQL bounds on `entry_time`, KPIs, monthly PnL, equity curve by `exit_time`, direction breakdown, CSV export, and optional **replay** of stored entry/exit snapshots. Replay draws **index spot** candles (labelled from `index_underlying`) plus **EMA envelope** when underlying JSON exists, and **option** candles with horizontal **entry / target / stop / exit** lines from the trade row (same rules as the Live option chart).
+Streamlit **Mock AI engine → Analytics** tab uses [`mock_trade_analytics.py`](trade_claw/mock_trade_analytics.py): IST calendar date range → UTC SQL bounds on `entry_time`, KPIs, monthly PnL, equity curve by `exit_time`, direction breakdown, CSV export, and optional **replay** of stored minute snapshots. **Replay** merges **entry + exit** JSON on one time axis for both **index spot** (envelope) and **option premium**: **F&O Options–style** chart with **entry** (cyan triangle) and **exit** (gold diamond) markers aligned to `entry_time` / `exit_time`, plus dashed **target** / **stop** lines from the trade row. Stored **`llm_rationale`** is shown above the option chart when present. The **Live** tab open-leg option chart uses the same marker and target/stop styling for the current session (live Kite 1m), with an entry marker at the bar nearest `entry_time`.
 
 ### Telemetry (`mock_engine_telemetry.py`)
 
@@ -232,7 +232,7 @@ Trade and scan events use logger **`trade_claw.mock_market_scan`** with a consis
 1. **Morning**: Start **Redis**, **Celery worker**, **Celery beat** (see `README.md`).
 2. **Kite session**: Log in via Streamlit once so `.kite_session.json` is written on the **same machine** as the worker, or export `KITE_ACCESS_TOKEN`.
 3. **OpenAI**: Set `OPENAI_API_KEY` (and optionally `OPENAI_MODEL`) for the LLM node.
-4. **Monitoring**: Streamlit → **Mock AI engine** — **Live** tab: auto-refreshing quotes/charts + telemetry; **Analytics** tab: multi-month stats from `mock_trades`, CSV export, snapshot replay (if enabled).
+4. **Monitoring**: Streamlit → **Mock AI engine** — **Live** tab: auto-refreshing quotes/charts + telemetry (open option chart: F&O-style entry marker + target/stop); **Analytics** tab: multi-month stats from `mock_trades`, CSV export, merged snapshot replay + rationale (if enabled).
 5. **End of day**: After **15:20 IST**, open rows are closed; Beat may still enqueue tasks until hour 15 ends, but logic stays idempotent.
 
 ### Docker Compose

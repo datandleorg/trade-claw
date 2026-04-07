@@ -7,6 +7,7 @@ import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import NamedTuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -31,8 +32,11 @@ from trade_claw.mock_market_signal import (
     nse_index_ltp_symbol,
     now_ist,
 )
+from trade_claw.pl_style import pl_title_color
 from trade_claw.strategies import _envelope_series, add_ma_envelope_line_traces
 from trade_claw.task_runtime import MOCK_TRADES_DB_PATH
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 
 class _SpotAxis(NamedTuple):
@@ -403,20 +407,184 @@ def _opt_minute_df(kite, nfo_instruments: list, tradingsymbol: str | None, sessi
     return df.sort_values("date").reset_index(drop=True)
 
 
-def _mock_replay_add_option_hlines(fig: go.Figure, row) -> None:
-    """Match Live tab option chart: entry / target / stop; plus exit when present."""
-    ep = float(row["entry_price"]) if pd.notna(row.get("entry_price")) else 0.0
-    tp = float(row["target"]) if pd.notna(row.get("target")) else 0.0
-    sp = float(row["stop_loss"]) if pd.notna(row.get("stop_loss")) else 0.0
-    xp = float(row["exit_price"]) if pd.notna(row.get("exit_price")) else 0.0
-    if ep > 0:
-        fig.add_hline(y=ep, line_dash="dot", line_color="cyan", annotation_text="Entry")
-    if tp > ep:
-        fig.add_hline(y=tp, line_dash="dot", line_color="lime", annotation_text="Target")
+def _trade_row_get(row, key: str, default=None):
+    """Support analytics ``pd.Series`` rows and Live ``MockTradeRow`` dataclass instances."""
+    if row is None:
+        return default
+    if isinstance(row, pd.Series):
+        if key not in row.index:
+            return default
+        v = row.loc[key]
+        if pd.isna(v):
+            return default
+        return v
+    return getattr(row, key, default)
+
+
+def _bars_json_to_df(raw) -> pd.DataFrame | None:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return None
+    try:
+        bars = json.loads(str(raw))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not bars:
+        return None
+    dfp = pd.DataFrame(bars)
+    if dfp.empty or "date" not in dfp.columns:
+        return None
+    dfp = dfp.copy()
+    dfp["date"] = pd.to_datetime(dfp["date"], errors="coerce")
+    dfp = dfp.dropna(subset=["date"])
+    if dfp.empty:
+        return None
+    return dfp.sort_values("date").reset_index(drop=True)
+
+
+def _merge_ohlc_snapshots(
+    df_a: pd.DataFrame | None,
+    df_b: pd.DataFrame | None,
+) -> pd.DataFrame | None:
+    frames = [f for f in (df_a, df_b) if f is not None and not f.empty]
+    if not frames:
+        return None
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.drop_duplicates(subset=["date"], keep="last")
+    return merged.sort_values("date").reset_index(drop=True)
+
+
+def _bar_times_utc_compare(dfp: pd.DataFrame) -> pd.Series:
+    ts = pd.to_datetime(dfp["date"], errors="coerce")
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize(_IST, ambiguous="infer", nonexistent="shift_forward")
+    return ts.dt.tz_convert("UTC")
+
+
+def _event_utc_parse(raw) -> pd.Timestamp | None:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return None
+    t = pd.to_datetime(raw, utc=True, errors="coerce")
+    if pd.isna(t):
+        return None
+    return t
+
+
+def _nearest_bar_idx(dfp: pd.DataFrame, event_raw) -> int | None:
+    if dfp is None or dfp.empty:
+        return None
+    ev = _event_utc_parse(event_raw)
+    if ev is None:
+        return None
+    bar_t = _bar_times_utc_compare(dfp)
+    if bar_t.isna().all():
+        return None
+    delta = (bar_t - ev).abs()
+    return int(delta.argmin())
+
+
+def _mock_option_leg_label(row) -> str:
+    inst = str(_trade_row_get(row, "instrument") or "")
+    d = str(_trade_row_get(row, "direction") or "").upper()
+    if "CE" in inst.upper() or d == "BUY":
+        return "Long CE"
+    if "PE" in inst.upper() or d == "SELL":
+        return "Long PE"
+    return d or "Option"
+
+
+def _mock_option_strike_display(inst: str) -> str | None:
+    """Last 4–8 digit run before CE/PE suffix (typical NFO tradingsymbol)."""
+    m = re.search(r"(\d{4,8})(CE|PE)\s*$", inst.upper())
+    return m.group(1) if m else None
+
+
+def _add_fo_style_option_markers_and_hlines(
+    fig: go.Figure,
+    dfp: pd.DataFrame,
+    row,
+    *,
+    entry_idx: int | None,
+    exit_idx: int | None,
+) -> None:
+    """F&O Options–style: entry/exit markers + dashed target/stop (no duplicate entry/exit hlines)."""
+    ddt = dfp["date"]
+    _ep = _trade_row_get(row, "entry_price")
+    ep = float(_ep) if _ep is not None and pd.notna(_ep) else 0.0
+    _xp = _trade_row_get(row, "exit_price")
+    xp = float(_xp) if _xp is not None and pd.notna(_xp) else 0.0
+    if entry_idx is not None and 0 <= entry_idx < len(ddt) and ep > 0:
+        fig.add_trace(
+            go.Scatter(
+                x=[ddt.iloc[entry_idx]],
+                y=[ep],
+                mode="markers",
+                marker=dict(
+                    symbol="triangle-up",
+                    size=12,
+                    color="cyan",
+                    line=dict(width=1, color="black"),
+                ),
+                name="Entry",
+            )
+        )
+    st_cl = str(_trade_row_get(row, "status") or "").upper()
+    if (
+        exit_idx is not None
+        and 0 <= exit_idx < len(ddt)
+        and xp > 0
+        and st_cl == "CLOSED"
+    ):
+        fig.add_trace(
+            go.Scatter(
+                x=[ddt.iloc[exit_idx]],
+                y=[xp],
+                mode="markers",
+                marker=dict(
+                    symbol="diamond",
+                    size=10,
+                    color="gold",
+                    line=dict(width=1, color="orange"),
+                ),
+                name="Exit",
+            )
+        )
+    _tp = _trade_row_get(row, "target")
+    tp = float(_tp) if _tp is not None and pd.notna(_tp) else 0.0
+    _sp = _trade_row_get(row, "stop_loss")
+    sp = float(_sp) if _sp is not None and pd.notna(_sp) else 0.0
+    if tp > ep and ep > 0:
+        fig.add_hline(
+            y=tp,
+            line_dash="dash",
+            line_color="rgba(34,197,94,0.85)",
+            annotation_text="Target",
+            annotation_position="right",
+        )
     if 0 < sp < ep:
-        fig.add_hline(y=sp, line_dash="dot", line_color="tomato", annotation_text="Stop")
-    if xp > 0:
-        fig.add_hline(y=xp, line_dash="dash", line_color="orange", annotation_text="Exit")
+        fig.add_hline(
+            y=sp,
+            line_dash="dash",
+            line_color="rgba(239,68,68,0.85)",
+            annotation_text="Stop",
+            annotation_position="right",
+        )
+
+
+def _mock_analytics_replay_option_title(row, tid: int) -> tuple[str, str]:
+    leg = _mock_option_leg_label(row)
+    inst = str(_trade_row_get(row, "instrument") or "Option")
+    sk = _mock_option_strike_display(inst)
+    leg_strike = f"{leg} @{float(sk):,.0f}" if sk else leg
+    st = str(_trade_row_get(row, "status") or "").upper()
+    pnl = pd.to_numeric(_trade_row_get(row, "realized_pnl"), errors="coerce")
+    if st == "OPEN":
+        title = f"{leg_strike} · `{inst}` · trade {tid} · OPEN"
+        col = "#94a3b8"
+    else:
+        pnl_v = float(pnl) if pd.notna(pnl) else 0.0
+        title = f"{leg_strike} · `{inst}` · Net ₹{pnl_v:+,.2f} · trade {tid} · CLOSED"
+        col = pl_title_color(pnl_v)
+    return title, col
 
 
 def _render_mock_analytics() -> None:
@@ -544,14 +712,14 @@ def _render_mock_analytics() -> None:
     )
     snap_rows = disp[has_opt | has_u] if not disp.empty else pd.DataFrame()
     if not snap_rows.empty:
-        with st.expander("Replay stored minute snapshots (entry/exit)", expanded=False):
+        with st.expander("Replay stored minute snapshots (merged entry + exit)", expanded=False):
             st.caption(
-                "Index spot envelope bands use **current** `MOCK_AGENT_ENVELOPE_PCT` (same as Live), "
-                "not the value at trade time. Underlying series matches the trade’s **index** column when set."
+                "Option and underlying charts **merge** entry and exit snapshots on one time axis (dedupe by bar time). "
+                "Entry/exit markers match **F&O Options** style. Index envelope uses **current** `MOCK_AGENT_ENVELOPE_PCT`. "
+                "Requires env **`MOCK_ENGINE_SNAPSHOT_BARS`** > 0 when trades are captured."
             )
             choices = [int(x) for x in snap_rows["trade_id"].tolist()]
             tid = st.selectbox("trade_id", choices, key="mock_an_snap_tid")
-            leg = st.radio("Leg", ["entry", "exit"], horizontal=True, key="mock_an_snap_leg")
             row = snap_rows[snap_rows["trade_id"] == tid].iloc[0]
             _iu = None
             if "index_underlying" in row.index:
@@ -560,48 +728,50 @@ def _render_mock_analytics() -> None:
                     _iu = str(v).strip().upper()
             snap_idx = _iu or "NIFTY"
             snap_idx_label = FO_INDEX_UNDERLYING_LABELS.get(snap_idx, snap_idx)
-            raw_u = (
-                row["entry_underlying_bars_json"]
-                if leg == "entry"
-                else row.get("exit_underlying_bars_json")
-            )
-            if raw_u is not None and not (isinstance(raw_u, float) and pd.isna(raw_u)):
+
+            df_ue = _bars_json_to_df(row.get("entry_underlying_bars_json"))
+            df_ux = _bars_json_to_df(row.get("exit_underlying_bars_json"))
+            df_um = _merge_ohlc_snapshots(df_ue, df_ux)
+            if df_um is not None and not df_um.empty:
                 try:
-                    ubars = json.loads(str(raw_u))
-                    if ubars:
-                        df_u = pd.DataFrame(ubars)
-                        df_u["date"] = pd.to_datetime(df_u["date"])
-                        env_pct_snap = mock_agent_envelope_pct()
-                        fig_u, _dual_u = _mock_index_spot_figure(
-                            df_u,
-                            snap_idx_label,
-                            env_pct_snap,
-                            ema_period=ENVELOPE_EMA_PERIOD,
-                        )
-                        fig_u.update_layout(
-                            title=(
-                                f"Trade {tid} — {snap_idx_label} ({leg}) stored snapshot "
-                                f"({len(ubars)} bars) + EMA envelope"
-                            ),
-                            height=420 if _dual_u else 300,
-                        )
-                        st.plotly_chart(fig_u, use_container_width=True, key="mock_an_snap_under")
-                except (json.JSONDecodeError, KeyError, ValueError) as e:
+                    env_pct_snap = mock_agent_envelope_pct()
+                    fig_u, _dual_u = _mock_index_spot_figure(
+                        df_um,
+                        snap_idx_label,
+                        env_pct_snap,
+                        ema_period=ENVELOPE_EMA_PERIOD,
+                    )
+                    fig_u.update_layout(
+                        title=(
+                            f"Trade {tid} — {snap_idx_label} spot (merged, {len(df_um)} bars) + EMA envelope"
+                        ),
+                        height=420 if _dual_u else 300,
+                    )
+                    st.plotly_chart(fig_u, use_container_width=True, key="mock_an_snap_under")
+                except (KeyError, ValueError) as e:
                     st.warning(f"Could not plot underlying snapshot: {e}")
             else:
-                st.caption("No underlying snapshot for this leg (older trades or capture failed).")
+                st.caption("No underlying snapshot (older trades or capture failed).")
 
-            raw = row["entry_bars_json"] if leg == "entry" else row["exit_bars_json"]
-            if raw is None or (isinstance(raw, float) and pd.isna(raw)):
-                st.caption("No option snapshot for this leg.")
+            rat = _trade_row_get(row, "llm_rationale")
+            if rat is not None and str(rat).strip():
+                st.markdown("**LLM rationale (at entry)**")
+                st.info(str(rat).strip())
+
+            df_oe = _bars_json_to_df(row.get("entry_bars_json"))
+            df_ox = _bars_json_to_df(row.get("exit_bars_json"))
+            dfp = _merge_ohlc_snapshots(df_oe, df_ox)
+            if dfp is None or dfp.empty:
+                st.caption("No option snapshot (enable `MOCK_ENGINE_SNAPSHOT_BARS` for new trades).")
             else:
                 try:
-                    bars = json.loads(str(raw))
-                    if not bars:
-                        st.caption("Empty option snapshot.")
+                    need = {"open", "high", "low", "close"}
+                    if not need.issubset(dfp.columns):
+                        st.caption("Option snapshot JSON missing OHLC columns.")
                     else:
-                        dfp = pd.DataFrame(bars)
-                        dfp["date"] = pd.to_datetime(dfp["date"])
+                        ent_i = _nearest_bar_idx(dfp, row.get("entry_time"))
+                        ex_i = _nearest_bar_idx(dfp, row.get("exit_time"))
+                        opt_name = str(row.get("instrument") or "Option")
                         fig_s = go.Figure(
                             data=[
                                 go.Candlestick(
@@ -610,15 +780,18 @@ def _render_mock_analytics() -> None:
                                     high=dfp["high"],
                                     low=dfp["low"],
                                     close=dfp["close"],
-                                    name=f"{leg} snapshot",
+                                    name=opt_name[:48],
                                 )
                             ]
                         )
-                        _mock_replay_add_option_hlines(fig_s, row)
+                        _add_fo_style_option_markers_and_hlines(
+                            fig_s, dfp, row, entry_idx=ent_i, exit_idx=ex_i
+                        )
+                        t_title, t_col = _mock_analytics_replay_option_title(row, tid)
                         fig_s.update_layout(
-                            title=f"Trade {tid} — option premium ({leg}, {len(bars)} bars)",
+                            title=dict(text=t_title, font=dict(color=t_col, size=13)),
                             template="plotly_dark",
-                            height=300,
+                            height=340,
                             xaxis_rangeslider_visible=False,
                         )
                         st.plotly_chart(fig_s, use_container_width=True, key="mock_an_snap_chart")
@@ -879,24 +1052,22 @@ def render_mock_engine(kite):
                             name=r.instrument,
                         )
                     )
-                    ep = float(r.entry_price or 0)
-                    tp = float(r.target or 0)
-                    sp = float(r.stop_loss or 0)
-                    if ep > 0:
-                        fig_o.add_hline(
-                            y=ep, line_dash="dot", line_color="cyan", annotation_text="Entry"
-                        )
-                    if tp > ep:
-                        fig_o.add_hline(
-                            y=tp, line_dash="dot", line_color="lime", annotation_text="Target"
-                        )
-                    if 0 < sp < ep:
-                        fig_o.add_hline(
-                            y=sp, line_dash="dot", line_color="tomato", annotation_text="Stop"
-                        )
+                    ent_i = _nearest_bar_idx(df_o, r.entry_time)
+                    _add_fo_style_option_markers_and_hlines(
+                        fig_o, df_o, r, entry_idx=ent_i, exit_idx=None
+                    )
+                    leg = _mock_option_leg_label(r)
+                    inst = r.instrument or "Option"
+                    sk = _mock_option_strike_display(inst)
+                    leg_strike = f"{leg} @{float(sk):,.0f}" if sk else leg
+                    up = float(u_pnl) if u_pnl is not None else 0.0
+                    live_title = f"{leg_strike} · `{inst}` · Unrealised ₹{up:+,.2f} · OPEN"
                     fig_o.update_layout(
-                        title=f"{r.instrument} — premium (1m)",
-                        height=260,
+                        title=dict(
+                            text=live_title,
+                            font=dict(color=pl_title_color(up), size=13),
+                        ),
+                        height=300,
                         xaxis_rangeslider_visible=False,
                         template="plotly_dark",
                     )
