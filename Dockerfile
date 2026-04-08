@@ -7,10 +7,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Chromium + fonts: required for Plotly static PNG export (Kaleido → choreographer) in mock LLM chart path.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     supervisor \
+    chromium \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh

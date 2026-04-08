@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from datetime import date
+from pathlib import Path
 from typing import Any, TypedDict
 
 from kiteconnect import KiteConnect
@@ -16,18 +18,28 @@ from pydantic import BaseModel, Field
 
 from trade_claw.constants import ENVELOPE_EMA_PERIOD, FO_INDEX_UNDERLYING_LABELS
 from trade_claw.env_trading_params import (
+    mock_llm_attach_underlying_chart,
+    mock_llm_prompt_log_dir,
     mock_llm_risk_instruction,
     mock_llm_sltp_fallback_to_env,
     mock_llm_sltp_stop_pct_bounds,
     mock_llm_sltp_target_pct_bounds,
+    mock_llm_vision_model,
     option_stop_premium_fraction,
     option_target_premium_fraction,
 )
+from trade_claw.mock_llm_prompt_log import (
+    write_llm_invoke_error_log,
+    write_llm_structured_output_log,
+    write_signal_llm_turn_log,
+)
+from trade_claw.mock_llm_signal_chart import underlying_session_chart_png_bytes
 from trade_claw.fo_support import _to_date
 from trade_claw.mock_market_signal import (
     envelope_breakout_on_last_bar,
     load_index_session_minute_df,
     mock_agent_envelope_pct,
+    now_ist,
     mock_agent_slippage_points,
     mock_engine_option_stop_multiplier,
     mock_engine_option_target_multiplier,
@@ -264,38 +276,169 @@ def build_mock_trading_graph(
         sug_stp = option_stop_premium_fraction()
         risk_extra = mock_llm_risk_instruction()
         risk_block = f"\n\nAdditional risk guidance from operator:\n{risk_extra}" if risk_extra else ""
-        sys = SystemMessage(
-            content=(
-                "You choose one **NSE F&O option** contract (index or single-stock underlying) for a "
-                "**long premium only** mock trade "
-                "(calls for bullish, puts for bearish — wrong type already removed in code). "
-                "Pick the best strike/expiry among the candidates using DTE, moneyness vs spot, and liquidity (LTP). "
-                "You must also output **stop_loss** and **target** as option **premium prices in Indian rupees (₹)** "
-                "for the **same contract** you pick (the chosen row's LTP is your reference). "
-                "Synthetic long entry will be approximately **LTP minus ~0.5–1.0 ₹ slippage** — "
-                "your stop_loss must be **strictly below** that entry and target **strictly above** it: "
-                "stop_loss < entry < target. "
-                f"Suggested distance from entry: target about +{100 * sug_tgt:.1f}% above entry, "
-                f"stop about −{100 * sug_stp:.1f}% below entry (guidance only). "
-                f"Hard bounds (validated in code): target between +{100 * tgt_lo_p:.1f}% and +{100 * tgt_hi_p:.1f}% "
-                f"above entry; stop between −{100 * st_hi_p:.1f}% and −{100 * st_lo_p:.1f}% below entry "
-                f"(i.e. stop premium in that band below entry). "
-                "Use two decimal places mentally; output numeric rupee levels."
-                f"{risk_block}"
-            )
+        base_sys = (
+            "You choose one **NSE F&O option** contract (index or single-stock underlying) for a "
+            "**long premium only** mock trade "
+            "(calls for bullish, puts for bearish — wrong type already removed in code). "
+            "Pick the best strike/expiry among the candidates using DTE, moneyness vs spot, and liquidity (LTP). "
+            "You must also output **stop_loss** and **target** as option **premium prices in Indian rupees (₹)** "
+            "for the **same contract** you pick (the chosen row's LTP is your reference). "
+            "Synthetic long entry will be approximately **LTP minus ~0.5–1.0 ₹ slippage** — "
+            "your stop_loss must be **strictly below** that entry and target **strictly above** it: "
+            "stop_loss < entry < target. "
+            f"Suggested distance from entry: target about +{100 * sug_tgt:.1f}% above entry, "
+            f"stop about −{100 * sug_stp:.1f}% below entry (guidance only). "
+            f"Hard bounds (validated in code): target between +{100 * tgt_lo_p:.1f}% and +{100 * tgt_hi_p:.1f}% "
+            f"above entry; stop between −{100 * st_hi_p:.1f}% and −{100 * st_lo_p:.1f}% below entry "
+            f"(i.e. stop premium in that band below entry). "
+            "Use two decimal places mentally; output numeric rupee levels."
+            f"{risk_block}"
         )
-        human = HumanMessage(
-            content=(
-                f"Underlying: {idx} ({idx_label}). Spot ~ {state.get('spot', 0):.2f}. "
-                f"Direction: {state.get('direction')}. Leg: {state.get('leg')}.\n"
-                f"Candidates (JSON):\n{json.dumps(cands, indent=2)}"
-            )
+        chart_png: bytes | None = None
+        if mock_llm_attach_underlying_chart():
+            df_chart, err_chart = load_index_session_minute_df(kite, nse_instruments, session_d, idx)
+            if df_chart is not None and not err_chart:
+                chart_png = underlying_session_chart_png_bytes(
+                    df_chart,
+                    envelope_pct=envelope_pct,
+                    signal_bar_time=(state.get("signal_bar_time") or "") or None,
+                    underlying_label=idx_label,
+                    direction=str(state.get("direction") or ""),
+                )
+                if chart_png is None:
+                    scan_warning(
+                        "graph_err",
+                        "LLM chart: PNG export returned nothing underlying=%s "
+                        "(Kaleido needs Chromium — install chromium in Docker image; see Dockerfile).",
+                        idx,
+                    )
+            elif err_chart:
+                scan_warning(
+                    "graph_err",
+                    "LLM chart: reload minute df failed underlying=%s: %s",
+                    idx,
+                    err_chart,
+                )
+        chart_note = (
+            "\n\nAn attached **chart image** shows today's underlying **1-minute** spot session with the **same "
+            "EMA envelope** (period and ±% bandwidth) as the breakout signal rule. Use it together with **spot**, "
+            "**direction**, and the **candidate table** for strike and liquidity, and to reason about **premium** "
+            "stop and target levels."
         )
+        sys_plain = SystemMessage(content=base_sys)
+        sys = (
+            SystemMessage(content=base_sys + chart_note)
+            if chart_png
+            else sys_plain
+        )
+        text_block = (
+            f"Underlying: {idx} ({idx_label}). Spot ~ {state.get('spot', 0):.2f}. "
+            f"Direction: {state.get('direction')}. Leg: {state.get('leg')}.\n"
+            f"Candidates (JSON):\n{json.dumps(cands, indent=2)}"
+        )
+        if chart_png:
+            b64 = base64.standard_b64encode(chart_png).decode("ascii")
+            human = HumanMessage(
+                content=[
+                    {"type": "text", "text": text_block},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ]
+            )
+        else:
+            human = HumanMessage(content=text_block)
+        invoke_model = (mock_llm_vision_model() or model) if chart_png else model
+        llm_invoke = ChatOpenAI(
+            api_key=key, model=invoke_model, temperature=0.2, max_completion_tokens=1200
+        ).with_structured_output(LLMPick)
+        prompt_log_run_dir: Path | None = None
+        log_root = mock_llm_prompt_log_dir()
+        if log_root:
+            sys_content = sys.content if isinstance(sys.content, str) else json.dumps(sys.content)
+            prompt_log_run_dir = write_signal_llm_turn_log(
+                Path(log_root),
+                ist_now=now_ist(),
+                session_d=session_d,
+                underlying=idx,
+                system_text=sys_content,
+                human_text=text_block,
+                chart_png=chart_png,
+                meta={
+                    "openai_model_default": model,
+                    "invoke_model": invoke_model,
+                    "direction": state.get("direction"),
+                    "leg": state.get("leg"),
+                    "spot": state.get("spot"),
+                    "signal_bar_time": state.get("signal_bar_time"),
+                    "signal_text": (state.get("signal_text") or "")[:4000],
+                    "envelope_pct": envelope_pct,
+                    "envelope_ema_period": ENVELOPE_EMA_PERIOD,
+                },
+            )
+            if prompt_log_run_dir:
+                scan_info("llm_prompt_log", "LLM prompt trace underlying=%s dir=%s", idx, prompt_log_run_dir)
+            else:
+                scan_warning(
+                    "graph_err",
+                    "LLM prompt log write failed underlying=%s root=%s",
+                    idx,
+                    log_root,
+                )
+        llm_invoke_path = "multimodal" if chart_png else "text_only"
         try:
-            pick: LLMPick = structured.invoke([sys, human])
+            pick: LLMPick = llm_invoke.invoke([sys, human])
         except Exception as e:  # noqa: BLE001
-            scan_warning("graph_err", "LLM invoke failed underlying=%s: %s", idx, e)
-            return {"error": f"LLM failed: {e}"}
+            if chart_png:
+                scan_warning(
+                    "graph_err",
+                    "LLM multimodal structured invoke failed underlying=%s model=%s: %s; retry text-only",
+                    idx,
+                    invoke_model,
+                    e,
+                )
+                if prompt_log_run_dir:
+                    try:
+                        plain_sys = (
+                            sys_plain.content
+                            if isinstance(sys_plain.content, str)
+                            else json.dumps(sys_plain.content)
+                        )
+                        (prompt_log_run_dir / "retry_system.txt").write_text(plain_sys, encoding="utf-8")
+                        (prompt_log_run_dir / "retry_human.txt").write_text(text_block, encoding="utf-8")
+                        (prompt_log_run_dir / "retry_note.txt").write_text(
+                            f"Multimodal invoke failed; text-only retry.\n{type(e).__name__}: {e}\n",
+                            encoding="utf-8",
+                        )
+                    except OSError:
+                        pass
+                human_plain = HumanMessage(content=text_block)
+                try:
+                    llm_invoke_path = "text_retry"
+                    pick = structured.invoke([sys_plain, human_plain])
+                except Exception as e2:  # noqa: BLE001
+                    scan_warning("graph_err", "LLM text-only retry failed underlying=%s: %s", idx, e2)
+                    if prompt_log_run_dir:
+                        write_llm_invoke_error_log(
+                            prompt_log_run_dir,
+                            f"LLM failed after text retry: {e2}",
+                            exc_type=type(e2).__name__,
+                        )
+                    return {"error": f"LLM failed: {e2}"}
+            else:
+                scan_warning("graph_err", "LLM invoke failed underlying=%s: %s", idx, e)
+                if prompt_log_run_dir:
+                    write_llm_invoke_error_log(
+                        prompt_log_run_dir,
+                        f"LLM invoke failed: {e}",
+                        exc_type=type(e).__name__,
+                    )
+                return {"error": f"LLM failed: {e}"}
+        if prompt_log_run_dir:
+            write_llm_structured_output_log(
+                prompt_log_run_dir,
+                pick,
+                invoke_path=llm_invoke_path,
+                symbol_in_candidate_list=pick.tradingsymbol in allowed,
+            )
         if pick.tradingsymbol not in allowed:
             scan_warning(
                 "graph_err",

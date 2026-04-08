@@ -154,7 +154,9 @@ flowchart LR
 ### Node: `llm`
 
 1. **Structured output** (`LLMPick`): `tradingsymbol`, `rationale`, **`stop_loss`**, **`target`** — option **premium** levels in **₹** for the chosen contract. The system prompt injects suggested % distances from `option_stop_premium_fraction` / `option_target_premium_fraction`, hard **min/max % bands** from `mock_llm_sltp_target_pct_bounds` / `mock_llm_sltp_stop_pct_bounds` (env `MOCK_LLM_SLTP_*` or derived defaults), and optional operator text from **`MOCK_LLM_RISK_INSTRUCTION`**.
-2. Validates `tradingsymbol` is **exactly** one of the five candidates.
+2. **Optional chart context** (`MOCK_LLM_ATTACH_UNDERLYING_CHART`): before the LLM call, the worker reloads the same **1-minute** session OHLC for `state["underlying"]`, renders a **static PNG** (Plotly + **Kaleido**) with **candlesticks**, the **same EMA envelope** as the signal (`ENVELOPE_EMA_PERIOD`, `mock_agent_envelope_pct()`), and a **vertical marker** at the signal bar time. The user message is then **multimodal** (text + `image_url` data-URL). If Kaleido is missing, export fails, or the model rejects the request, the code **logs** and **retries once** with the original **text-only** message and the default `ChatOpenAI` instance (`OPENAI_MODEL`). When a chart is present, **`MOCK_LLM_VISION_MODEL`** may be set to a **vision-capable** model name; if unset, `OPENAI_MODEL` is used for that call (it must support images when the flag is on).
+3. Optional **prompt trace** (`MOCK_LLM_PROMPT_LOG_DIR`): writes the first LLM attempt’s system text, human text, chart PNG (if any), and after the model returns, **`llm_output.json`** (structured pick + `_llm_invoke_path`, `_symbol_in_candidate_list`). If the invoke fails entirely, **`llm_error.json`** is written instead. Only runs in this node (i.e. after a real signal and successful candidates).
+4. Validates `tradingsymbol` is **exactly** one of the five candidates.
 
 ### Node: `execute`
 
@@ -265,6 +267,9 @@ Telemetry (`last_scan` / `last_graph`) and mock trades live in the same SQLite f
 | `MOCK_LLM_SLTP_STOP_PCT_MIN` / `MOCK_LLM_SLTP_STOP_PCT_MAX` | Whole-number **% below entry** for valid LLM stop (band width; both must be set to override derived defaults). |
 | `MOCK_LLM_SLTP_FALLBACK` | If `1`, invalid or missing LLM stop/target → env option stop/target multipliers instead of aborting execute. |
 | `MOCK_LLM_RISK_INSTRUCTION` | Free-text appended to the LLM system prompt. |
+| `MOCK_LLM_ATTACH_UNDERLYING_CHART` | If set, attach a PNG of today's underlying 1m session + EMA envelope to the LLM turn (requires **kaleido**; Docker may need extra OS deps for static export). |
+| `MOCK_LLM_VISION_MODEL` | Optional OpenAI model used **only when** a chart image is attached (e.g. `gpt-4o-mini`); if unset, `OPENAI_MODEL` is used. |
+| `MOCK_LLM_PROMPT_LOG_DIR` | If set, each **signal → LLM** invocation writes `system.txt`, `human.txt`, optional `chart.png`, `meta.json`, and **`llm_output.json`** (or **`llm_error.json`** on failure) under `<dir>/<session_date>/<HHMM>/…` (IST wall clock). On multimodal failure + text retry, `retry_*.txt` is added in the same run folder. |
 | `REDIS_URL` / `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Celery |
 
 See `.env.example` (**Trading defaults**). Implementation: `trade_claw/env_trading_params.py`.

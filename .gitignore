@@ -10,3 +10,4 @@ data/*.db
 
 .venv/
 data/
+mock_llm_prompt_logs_from_container/

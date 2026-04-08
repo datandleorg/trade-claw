@@ -278,3 +278,29 @@ def mock_llm_sltp_stop_pct_bounds() -> tuple[float, float]:
 def mock_llm_sltp_fallback_to_env() -> bool:
     """If true, invalid LLM stop/target use env multipliers instead of aborting."""
     return _env_truthy("MOCK_LLM_SLTP_FALLBACK")
+
+
+def mock_llm_attach_underlying_chart() -> bool:
+    """
+    When true, mock engine ``llm_node`` attaches a PNG of today's underlying 1m session + EMA envelope
+    (requires ``kaleido`` for static export and a vision-capable OpenAI model). See ``MOCK_LLM_VISION_MODEL``.
+    """
+    return _env_truthy("MOCK_LLM_ATTACH_UNDERLYING_CHART")
+
+
+def mock_llm_vision_model() -> str | None:
+    """
+    Optional model name used for the LLM pick **when** a chart image is attached (e.g. ``gpt-4o-mini``).
+    If unset, ``OPENAI_MODEL`` is used for both text and image (must support vision for chart path).
+    """
+    raw = (os.environ.get("MOCK_LLM_VISION_MODEL") or "").strip()
+    return raw if raw else None
+
+
+def mock_llm_prompt_log_dir() -> str | None:
+    """
+    Base directory for mock-engine **signal → LLM** turn logs (system + human text, optional chart PNG),
+    under ``<dir>/<session_date>/<HHMM>/<underlying>_…/``. Empty/unset = disabled.
+    """
+    raw = (os.environ.get("MOCK_LLM_PROMPT_LOG_DIR") or "").strip()
+    return raw if raw else None
