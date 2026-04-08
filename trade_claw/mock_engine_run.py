@@ -13,6 +13,7 @@ from trade_claw.kite_headless import get_kite_headless
 from trade_claw.mock_market_signal import (
     in_entry_window,
     mock_agent_envelope_pct,
+    mock_agent_envelope_pct_for_underlying,
     mock_agent_slippage_points,
     mock_engine_underlyings,
     nse_index_ltp_symbol,
@@ -146,7 +147,12 @@ def _close_at_ltp(
             try:
                 nfo = kite.instruments("NFO")
                 exit_snap = fetch_option_minute_bars_json(
-                    kite, nfo, row.instrument, sd, max_bars=nb
+                    kite,
+                    nfo,
+                    row.instrument,
+                    sd,
+                    max_bars=nb,
+                    entry_time_sql=row.entry_time,
                 )
             except Exception:  # noqa: BLE001
                 exit_snap = None
@@ -154,7 +160,12 @@ def _close_at_ltp(
             nse = kite.instruments("NSE")
             ukey = (row.index_underlying or "NIFTY").strip().upper()
             exit_under_snap = fetch_index_minute_bars_json(
-                kite, nse, sd, ukey, max_bars=nb
+                kite,
+                nse,
+                sd,
+                ukey,
+                max_bars=nb,
+                entry_time_sql=row.entry_time,
             )
         except Exception:  # noqa: BLE001
             exit_under_snap = None
@@ -263,6 +274,7 @@ def run_scan() -> dict[str, Any]:
 
     def finalize(graph_state: dict[str, Any] | None = None) -> None:
         out["agent_envelope_pct"] = mock_agent_envelope_pct()
+        out["agent_envelope_pct_index"] = mock_agent_envelope_pct_for_underlying("NIFTY")
         out["agent_ema_period"] = ENVELOPE_EMA_PERIOD
         out["open_trades_detail"] = _open_trades_payload()
         if kite is not None:

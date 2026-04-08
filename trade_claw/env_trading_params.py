@@ -8,6 +8,7 @@ from trade_claw.constants import (
     FO_BREAKOUT_PENETRATION_DEFAULT_PCT,
     FO_ENVELOPE_BANDWIDTH_MAX_PCT,
     FO_ENVELOPE_BANDWIDTH_MIN_PCT,
+    FO_INDEX_UNDERLYING_KEYS,
 )
 
 _DEFAULT_MOCK_AGENT_ENVELOPE_DECIMAL = 0.25
@@ -25,6 +26,20 @@ def fno_envelope_decimal_per_side() -> float:
     if raw:
         return float(raw)
     return float(_DEFAULT_MOCK_AGENT_ENVELOPE_DECIMAL)
+
+
+def mock_engine_envelope_decimal_per_side(underlying_key: str) -> float:
+    """
+    Mock engine scan/chart: envelope half-width per side for this NSE underlying key.
+
+    Index keys (``FO_INDEX_UNDERLYING_KEYS``): use ``MOCK_AGENT_INDEX_ENVELOPE_PCT`` when set;
+    otherwise same as :func:`fno_envelope_decimal_per_side`. Other keys always use the latter.
+    """
+    key = (underlying_key or "").strip().upper()
+    raw_idx = (os.environ.get("MOCK_AGENT_INDEX_ENVELOPE_PCT") or "").strip()
+    if key in FO_INDEX_UNDERLYING_KEYS and raw_idx:
+        return float(raw_idx)
+    return fno_envelope_decimal_per_side()
 
 
 def fo_options_default_envelope_bandwidth_pct() -> float:

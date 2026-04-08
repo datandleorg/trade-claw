@@ -16,6 +16,7 @@ from trade_claw.env_trading_params import (
     fo_options_default_option_target_pct_ui,
     fno_envelope_decimal_per_side,
     mock_engine_breakout_clear_pct,
+    mock_engine_envelope_decimal_per_side,
     mock_engine_breakout_max_lower_wick_frac,
     mock_engine_breakout_max_upper_wick_frac,
     mock_engine_breakout_min_body_frac,
@@ -45,6 +46,11 @@ def mock_agent_envelope_pct() -> float:
     Env ``MOCK_AGENT_ENVELOPE_PCT`` overrides; else product default for mock engine / agent envelope.
     """
     return fno_envelope_decimal_per_side()
+
+
+def mock_agent_envelope_pct_for_underlying(u: str) -> float:
+    """Envelope half-width for mock scan/chart for ``u`` (index vs equity via ``MOCK_AGENT_INDEX_ENVELOPE_PCT``)."""
+    return mock_engine_envelope_decimal_per_side(u)
 
 
 def fo_option_target_pct_runtime() -> float:

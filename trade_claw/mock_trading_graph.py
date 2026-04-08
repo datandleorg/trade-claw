@@ -40,6 +40,7 @@ from trade_claw.mock_market_signal import (
     load_index_session_minute_df,
     mock_agent_envelope_pct,
     now_ist,
+    mock_agent_envelope_pct_for_underlying,
     mock_agent_slippage_points,
     mock_engine_option_stop_multiplier,
     mock_engine_option_target_multiplier,
@@ -163,7 +164,6 @@ def build_mock_trading_graph(
     key, model = _openai_creds()
     llm = ChatOpenAI(api_key=key, model=model, temperature=0.2, max_completion_tokens=1200)
     structured = llm.with_structured_output(LLMPick)
-    envelope_pct = mock_agent_envelope_pct()
 
     def signal_node(state: TradingState) -> TradingState:
         parts: list[str] = []
@@ -188,8 +188,9 @@ def build_mock_trading_graph(
             if df is None or err:
                 parts.append(f"{u}: {err or 'no data'}")
                 continue
+            pct = mock_agent_envelope_pct_for_underlying(u)
             ok, text, sig = envelope_breakout_on_last_bar(
-                df, ema_period=ENVELOPE_EMA_PERIOD, pct=envelope_pct
+                df, ema_period=ENVELOPE_EMA_PERIOD, pct=pct
             )
             if ok and sig.get("direction"):
                 scan_info(

@@ -27,7 +27,7 @@ from trade_claw.constants import (
 from trade_claw.market_data import candles_to_dataframe
 from trade_claw.mock_market_signal import (
     load_index_session_minute_df,
-    mock_agent_envelope_pct,
+    mock_agent_envelope_pct_for_underlying,
     mock_engine_underlyings,
     nse_index_ltp_symbol,
     now_ist,
@@ -763,8 +763,10 @@ def _render_mock_analytics() -> None:
         with st.expander("Replay stored minute snapshots (merged entry + exit)", expanded=False):
             st.caption(
                 "Option and underlying charts **merge** entry and exit snapshots on one time axis (dedupe by bar time). "
-                "Entry/exit markers match **F&O Options** style. Index envelope uses **current** `MOCK_AGENT_ENVELOPE_PCT`. "
-                "Requires env **`MOCK_ENGINE_SNAPSHOT_BARS`** > 0 when trades are captured."
+                "Entry/exit markers match **F&O Options** style. Index spot envelope uses **current** env: "
+                "**`MOCK_AGENT_INDEX_ENVELOPE_PCT`** for NIFTY/BANKNIFTY/MIDCPNIFTY when set, else **`MOCK_AGENT_ENVELOPE_PCT`**. "
+                "Requires env **`MOCK_ENGINE_SNAPSHOT_BARS`** > 0 when trades are captured; exit snapshots store the **entry→exit** "
+                "hold window (see **`MOCK_ENGINE_SNAPSHOT_EXIT_MAX_BARS`**)."
             )
             choices = [int(x) for x in snap_rows["trade_id"].tolist()]
             tid = st.selectbox("trade_id", choices, key="mock_an_snap_tid")
@@ -782,7 +784,7 @@ def _render_mock_analytics() -> None:
             df_um = _merge_ohlc_snapshots(df_ue, df_ux)
             if df_um is not None and not df_um.empty:
                 try:
-                    env_pct_snap = mock_agent_envelope_pct()
+                    env_pct_snap = mock_agent_envelope_pct_for_underlying(snap_idx)
                     fig_u, _dual_u = _mock_index_spot_figure(
                         df_um,
                         snap_idx_label,
@@ -882,7 +884,8 @@ def render_mock_engine(kite):
     nse = st.session_state.nse_instruments
     nfo = st.session_state.nfo_instruments
     session_d = _session_date_today_ist()
-    env_pct = mock_agent_envelope_pct()
+    _env_pct_index = mock_agent_envelope_pct_for_underlying("NIFTY")
+    _env_pct_equity = mock_agent_envelope_pct_for_underlying("RELIANCE")
 
     @st.fragment(run_every=timedelta(minutes=1))
     def _hud():
@@ -1027,11 +1030,26 @@ def render_mock_engine(kite):
         with w3:
             st.metric("Scan skip / state", last_scan.get("skipped") or "ok")
         with w4:
-            st.metric(
-                "Envelope ±",
-                f"{100 * env_pct:.3f}%",
-                help="From MOCK_AGENT_ENVELOPE_PCT (trade_claw.env_trading_params.fno_envelope_decimal_per_side)",
-            )
+            if abs(_env_pct_index - _env_pct_equity) <= 1e-15:
+                st.metric(
+                    "Envelope ±",
+                    f"{100 * _env_pct_equity:.3f}%",
+                    help="From MOCK_AGENT_ENVELOPE_PCT (trade_claw.env_trading_params.fno_envelope_decimal_per_side)",
+                )
+            else:
+                w4a, w4b = st.columns(2)
+                with w4a:
+                    st.metric(
+                        "Envelope ± (index)",
+                        f"{100 * _env_pct_index:.3f}%",
+                        help="MOCK_AGENT_INDEX_ENVELOPE_PCT when set; else MOCK_AGENT_ENVELOPE_PCT",
+                    )
+                with w4b:
+                    st.metric(
+                        "Envelope ± (equity)",
+                        f"{100 * _env_pct_equity:.3f}%",
+                        help="MOCK_AGENT_ENVELOPE_PCT (trade_claw.env_trading_params.fno_envelope_decimal_per_side)",
+                    )
 
         if not open_rows:
             st.info(
@@ -1039,8 +1057,14 @@ def render_mock_engine(kite):
             )
 
         st.subheader("Scrips — two columns")
+        if abs(_env_pct_index - _env_pct_equity) <= 1e-15:
+            _cap_env = f"± **{100 * _env_pct_equity:.3f}%**"
+        else:
+            _cap_env = (
+                f"**index** ±{100 * _env_pct_index:.3f}% · **equity** ±{100 * _env_pct_equity:.3f}%"
+            )
         st.caption(
-            f"EMA **{ENVELOPE_EMA_PERIOD}** ± **{100 * env_pct:.3f}%** envelope on spot (1m). "
+            f"EMA **{ENVELOPE_EMA_PERIOD}** envelope on spot (1m): {_cap_env}. "
             "Each cell: quote, spot chart, last worker/LLM telemetry, and any **open** position for that underlying."
         )
         pu_map = last_graph.get("per_underlying") if isinstance(last_graph, dict) else None
@@ -1161,9 +1185,10 @@ def render_mock_engine(kite):
                         st.metric("Spot LTP", _fmt)
 
                     df_u, err_u = load_index_session_minute_df(kite, nse, session_d, u)
+                    env_pct_u = mock_agent_envelope_pct_for_underlying(u)
                     if df_u is not None and not df_u.empty and not err_u:
                         center, upper, lower = _envelope_series(
-                            df_u, ENVELOPE_EMA_PERIOD, env_pct
+                            df_u, ENVELOPE_EMA_PERIOD, env_pct_u
                         )
                         if len(df_u) >= ENVELOPE_EMA_PERIOD:
                             ema_v = float(center.iloc[-1])
@@ -1187,7 +1212,7 @@ def render_mock_engine(kite):
                                     d_u = spot_last - up_v
                                     d_r, pct_s = _metric_inr_and_pct_desc(d_u, pct_base=up_v)
                                     st.metric(
-                                        f"Upper +{100 * env_pct:.1f}%",
+                                        f"Upper +{100 * env_pct_u:.1f}%",
                                         f"₹{up_v:,.2f}",
                                         delta=d_r,
                                         delta_color="off",
@@ -1198,7 +1223,7 @@ def render_mock_engine(kite):
                                     d_l = spot_last - lo_v
                                     d_r, pct_s = _metric_inr_and_pct_desc(d_l, pct_base=lo_v)
                                     st.metric(
-                                        f"Lower −{100 * env_pct:.1f}%",
+                                        f"Lower −{100 * env_pct_u:.1f}%",
                                         f"₹{lo_v:,.2f}",
                                         delta=d_r,
                                         delta_color="off",
@@ -1206,7 +1231,7 @@ def render_mock_engine(kite):
                                         help="Spot minus lower band (₹ and % of band level).",
                                     )
                         fig_u, dual_panel = _mock_index_spot_figure(
-                            df_u, idx_label, env_pct, ema_period=ENVELOPE_EMA_PERIOD
+                            df_u, idx_label, env_pct_u, ema_period=ENVELOPE_EMA_PERIOD
                         )
                         fig_u.update_layout(
                             title=f"{u} spot (1m)",

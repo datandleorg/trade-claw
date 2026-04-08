@@ -107,5 +107,5 @@ All of the following are applied **after** the cross, optional penetration, and 
 
 ## Related
 
-- Envelope bandwidth: `MOCK_AGENT_ENVELOPE_PCT` / `fno_envelope_decimal_per_side()` — same geometry as `strategies._envelope_series`.
+- Envelope bandwidth: per underlying `mock_engine_envelope_decimal_per_side(underlying)` — index keys use optional `MOCK_AGENT_INDEX_ENVELOPE_PCT`, else `MOCK_AGENT_ENVELOPE_PCT` / `fno_envelope_decimal_per_side()` — same geometry as `strategies._envelope_series`.
 - Entry **time** window for **new** trades (Celery): still `in_entry_window` (weekdays 09:15–15:19 IST); that is separate from the breakout rules above.
