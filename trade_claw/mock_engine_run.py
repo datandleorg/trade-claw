@@ -52,6 +52,7 @@ def _graph_result_telemetry_payload(underlying_key: str, result: dict[str, Any])
         "stop_loss": result.get("stop_loss"),
         "target": result.get("target"),
         "llm_rationale": result.get("llm_rationale"),
+        "signal_llm_rationale": result.get("signal_llm_rationale"),
         "candidates": result.get("candidates"),
     }
 

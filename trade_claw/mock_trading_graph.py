@@ -9,6 +9,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, TypedDict
 
+import pandas as pd
 from kiteconnect import KiteConnect
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -19,6 +20,7 @@ from pydantic import BaseModel, Field
 from trade_claw.constants import ENVELOPE_EMA_PERIOD, FO_INDEX_UNDERLYING_LABELS
 from trade_claw.env_trading_params import (
     mock_llm_attach_underlying_chart,
+    mock_llm_breakout_from_chart,
     mock_llm_prompt_log_dir,
     mock_llm_risk_instruction,
     mock_llm_sltp_fallback_to_env,
@@ -38,7 +40,6 @@ from trade_claw.fo_support import _to_date
 from trade_claw.mock_market_signal import (
     envelope_breakout_on_last_bar,
     load_index_session_minute_df,
-    mock_agent_envelope_pct,
     now_ist,
     mock_agent_envelope_pct_for_underlying,
     mock_agent_slippage_points,
@@ -125,6 +126,21 @@ class LLMPick(BaseModel):
     target: float = Field(description="Take-profit for the chosen option, premium in INR (must be above synthetic entry)")
 
 
+class LLMBreakoutAssessment(BaseModel):
+    breakout: bool = Field(
+        description="True only if the latest completed bar shows a fresh EMA-envelope breakout (close outside band)"
+    )
+    direction: str = Field(
+        description="BULLISH or BEARISH when breakout is true; empty string when false",
+    )
+    leg: str = Field(description="CE for BULLISH, PE for BEARISH, empty when no breakout")
+    rationale: str = Field(description="Brief reasoning from the chart (1–4 sentences)")
+    signal_bar_time: str = Field(
+        default="",
+        description="Breakout bar timestamp if visible (ISO-like), else empty",
+    )
+
+
 class TradingState(TypedDict, total=False):
     error: str
     notes: str
@@ -142,6 +158,7 @@ class TradingState(TypedDict, total=False):
     stop_loss: float
     target: float
     llm_rationale: str
+    signal_llm_rationale: str
     trade_id: int
 
 
@@ -164,6 +181,101 @@ def build_mock_trading_graph(
     key, model = _openai_creds()
     llm = ChatOpenAI(api_key=key, model=model, temperature=0.2, max_completion_tokens=1200)
     structured = llm.with_structured_output(LLMPick)
+
+    _LLM_BREAKOUT_REJECT = "__llm_breakout_reject__"
+
+    def _llm_assess_envelope_breakout(
+        u: str, df: pd.DataFrame, pct: float, parts: list[str]
+    ) -> dict[str, Any] | None | str:
+        """
+        Vision assessment. Returns:
+        - ``dict`` → emit as signal state;
+        - ``_LLM_BREAKOUT_REJECT`` → model declined (no deterministic envelope for this underlying this tick);
+        - ``None`` → chart/API unusable → caller should fall back to ``envelope_breakout_on_last_bar``.
+        """
+        idx_label = FO_INDEX_UNDERLYING_LABELS.get(u, u)
+        chart_png = underlying_session_chart_png_bytes(
+            df,
+            envelope_pct=pct,
+            signal_bar_time=None,
+            underlying_label=idx_label,
+            direction="",
+            assessment_mode=True,
+        )
+        if chart_png is None:
+            return None
+        sys_b = SystemMessage(
+            content=(
+                f"You review an NSE underlying **1-minute** spot chart for **{idx_label}**. "
+                f"Candles are OHLC; curves are **EMA {ENVELOPE_EMA_PERIOD}** and **±{100 * pct:.3f}%** envelope "
+                "(same geometry as the mock engine). A **yellow vertical line** marks the **latest bar**.\n"
+                "Set **breakout=true** only if the **last completed candle** shows a **fresh** breakout: "
+                "**BULLISH** = close clearly **above** the upper band (not merely hugging from inside); "
+                "**BEARISH** = close clearly **below** the lower band.\n"
+                "If price is inside the band, ambiguous, or only a touch without a decisive close outside, "
+                "set **breakout=false**. **direction** must be BULLISH or BEARISH when breakout is true; "
+                "**leg** must be CE or PE accordingly. **rationale** must cite what you see on the chart."
+            )
+        )
+        last_close = float(df["close"].iloc[-1])
+        hum_txt = f"Underlying {u} ({idx_label}). Last close ≈ {last_close:.2f}. Assess breakout from the image."
+        b64 = base64.standard_b64encode(chart_png).decode("ascii")
+        human = HumanMessage(
+            content=[
+                {"type": "text", "text": hum_txt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            ]
+        )
+        invoke_model = mock_llm_vision_model() or model
+        llm_br = ChatOpenAI(
+            api_key=key, model=invoke_model, temperature=0.1, max_completion_tokens=700
+        ).with_structured_output(LLMBreakoutAssessment)
+        out: LLMBreakoutAssessment = llm_br.invoke([sys_b, human])
+        rat = (out.rationale or "").strip()
+        if not out.breakout:
+            parts.append(f"{u}: LLM no breakout — {rat[:320]}" if rat else f"{u}: LLM no breakout")
+            return _LLM_BREAKOUT_REJECT
+        d = (out.direction or "").strip().upper()
+        leg_m = (out.leg or "").strip().upper()
+        direction: str | None = None
+        leg: str | None = None
+        if "BULL" in d or leg_m == "CE":
+            direction, leg = "BULLISH", "CE"
+        elif "BEAR" in d or leg_m == "PE":
+            direction, leg = "BEARISH", "PE"
+        if direction is None or leg is None:
+            scan_warning(
+                "graph_err",
+                "LLM breakout inconsistent underlying=%s direction=%r leg=%r",
+                u,
+                out.direction,
+                out.leg,
+            )
+            parts.append(f"{u}: LLM breakout parse failed — {rat[:200]}" if rat else f"{u}: LLM breakout parse failed")
+            return _LLM_BREAKOUT_REJECT
+        spot = float(df["close"].iloc[-1])
+        sbt = (out.signal_bar_time or "").strip()
+        if not sbt:
+            last_dt = df["date"].iloc[-1]
+            sbt = last_dt.isoformat() if hasattr(last_dt, "isoformat") else str(last_dt)
+        scan_info(
+            "signal",
+            "SIGNAL_LLM underlying=%s direction=%s leg=%s spot=%.2f bar=%s",
+            u,
+            direction,
+            leg,
+            spot,
+            sbt,
+        )
+        return {
+            "underlying": u,
+            "direction": direction,
+            "leg": leg,
+            "spot": spot,
+            "signal_bar_time": sbt,
+            "signal_text": f"{u}: LLM chart breakout — {rat}" if rat else f"{u}: LLM chart breakout",
+            "signal_llm_rationale": rat,
+        }
 
     def signal_node(state: TradingState) -> TradingState:
         parts: list[str] = []
@@ -189,6 +301,29 @@ def build_mock_trading_graph(
                 parts.append(f"{u}: {err or 'no data'}")
                 continue
             pct = mock_agent_envelope_pct_for_underlying(u)
+            if mock_llm_breakout_from_chart():
+                if not mock_llm_attach_underlying_chart():
+                    scan_warning(
+                        "graph_err",
+                        "MOCK_LLM_BREAKOUT_FROM_CHART requires MOCK_LLM_ATTACH_UNDERLYING_CHART=1; "
+                        "using deterministic envelope only underlying=%s",
+                        u,
+                    )
+                else:
+                    try:
+                        llm_res = _llm_assess_envelope_breakout(u, df, pct, parts)
+                    except Exception as e:  # noqa: BLE001
+                        scan_warning(
+                            "graph_err",
+                            "LLM breakout invoke failed underlying=%s: %s; envelope fallback",
+                            u,
+                            e,
+                        )
+                        llm_res = None
+                    if isinstance(llm_res, dict):
+                        return llm_res
+                    if llm_res == _LLM_BREAKOUT_REJECT:
+                        continue
             ok, text, sig = envelope_breakout_on_last_bar(
                 df, ema_period=ENVELOPE_EMA_PERIOD, pct=pct
             )
@@ -271,6 +406,7 @@ def build_mock_trading_graph(
         allowed = {c["tradingsymbol"] for c in cands if c.get("tradingsymbol")}
         idx = (state.get("underlying") or "NIFTY").strip().upper()
         idx_label = FO_INDEX_UNDERLYING_LABELS.get(idx, idx)
+        envelope_pct_u = mock_agent_envelope_pct_for_underlying(idx)
         tgt_lo_p, tgt_hi_p = mock_llm_sltp_target_pct_bounds()
         st_lo_p, st_hi_p = mock_llm_sltp_stop_pct_bounds()
         sug_tgt = option_target_premium_fraction()
@@ -301,7 +437,7 @@ def build_mock_trading_graph(
             if df_chart is not None and not err_chart:
                 chart_png = underlying_session_chart_png_bytes(
                     df_chart,
-                    envelope_pct=envelope_pct,
+                    envelope_pct=envelope_pct_u,
                     signal_bar_time=(state.get("signal_bar_time") or "") or None,
                     underlying_label=idx_label,
                     direction=str(state.get("direction") or ""),
@@ -332,10 +468,17 @@ def build_mock_trading_graph(
             if chart_png
             else sys_plain
         )
+        sig_chart_rat = (state.get("signal_llm_rationale") or "").strip()
+        sig_block = (
+            f"\nChart-based breakout assessment (already decided):\n{sig_chart_rat}\n"
+            if sig_chart_rat
+            else ""
+        )
         text_block = (
             f"Underlying: {idx} ({idx_label}). Spot ~ {state.get('spot', 0):.2f}. "
-            f"Direction: {state.get('direction')}. Leg: {state.get('leg')}.\n"
-            f"Candidates (JSON):\n{json.dumps(cands, indent=2)}"
+            f"Direction: {state.get('direction')}. Leg: {state.get('leg')}."
+            f"{sig_block}"
+            f"\nCandidates (JSON):\n{json.dumps(cands, indent=2)}"
         )
         if chart_png:
             b64 = base64.standard_b64encode(chart_png).decode("ascii")
@@ -371,8 +514,9 @@ def build_mock_trading_graph(
                     "spot": state.get("spot"),
                     "signal_bar_time": state.get("signal_bar_time"),
                     "signal_text": (state.get("signal_text") or "")[:4000],
-                    "envelope_pct": envelope_pct,
+                    "envelope_pct": envelope_pct_u,
                     "envelope_ema_period": ENVELOPE_EMA_PERIOD,
+                    "signal_llm_rationale": (state.get("signal_llm_rationale") or "")[:4000],
                 },
             )
             if prompt_log_run_dir:
@@ -497,6 +641,14 @@ def build_mock_trading_graph(
             return {"error": sltp_err}
         qty_units = lot_size  # mock: always 1 exchange lot (PnL uses units = lot_size)
         idx = (state.get("underlying") or "NIFTY").strip().upper()
+        sig_r = (state.get("signal_llm_rationale") or "").strip()
+        pick_r = (state.get("llm_rationale") or "").strip()
+        if sig_r and pick_r:
+            combined_rat = f"[Breakout / chart] {sig_r}\n[Strike / risk] {pick_r}"
+        elif pick_r:
+            combined_rat = pick_r
+        else:
+            combined_rat = sig_r
         try:
             tid = mock_trade_store.insert_open_trade(
                 instrument=tsym,
@@ -504,7 +656,7 @@ def build_mock_trading_graph(
                 entry_price=entry,
                 stop_loss=stop_loss,
                 target=target,
-                llm_rationale=str(state.get("llm_rationale") or ""),
+                llm_rationale=combined_rat,
                 lot_size=lot_size,
                 quantity=qty_units,
                 index_underlying=idx,

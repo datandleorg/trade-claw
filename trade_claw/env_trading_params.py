@@ -303,6 +303,16 @@ def mock_llm_attach_underlying_chart() -> bool:
     return _env_truthy("MOCK_LLM_ATTACH_UNDERLYING_CHART")
 
 
+def mock_llm_breakout_from_chart() -> bool:
+    """
+    When true, mock engine **signal** step uses a **vision LLM** on the same underlying chart PNG to decide
+    whether there is a valid envelope breakout (instead of the deterministic ``envelope_breakout_on_last_bar``).
+    Requires ``MOCK_LLM_ATTACH_UNDERLYING_CHART=1`` and working Kaleido PNG export; if the chart cannot be built,
+    the worker falls back to the deterministic envelope for that underlying.
+    """
+    return _env_truthy("MOCK_LLM_BREAKOUT_FROM_CHART")
+
+
 def mock_llm_vision_model() -> str | None:
     """
     Optional model name used for the LLM pick **when** a chart image is attached (e.g. ``gpt-4o-mini``).

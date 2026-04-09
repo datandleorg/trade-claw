@@ -314,6 +314,41 @@ def has_open_trade_for_underlying(index_key: str) -> bool:
     return row is not None
 
 
+def get_trade_by_id(trade_id: int) -> MockTradeRow | None:
+    init_db()
+    with _lock, _connect() as conn:
+        r = conn.execute(
+            f"""
+            SELECT {_SELECT_ROW.strip()}
+            FROM mock_trades
+            WHERE trade_id = ?
+            """,
+            (int(trade_id),),
+        ).fetchone()
+    return _row(r) if r else None
+
+
+def update_exit_snapshots_json(
+    trade_id: int,
+    *,
+    exit_bars_json: str | None,
+    exit_underlying_bars_json: str | None,
+) -> bool:
+    """Rewrite stored minute OHLC JSON for analytics replay (does not change prices, times, or status)."""
+    init_db()
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE mock_trades
+            SET exit_bars_json = ?, exit_underlying_bars_json = ?
+            WHERE trade_id = ?
+            """,
+            (exit_bars_json, exit_underlying_bars_json, int(trade_id)),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def list_recent_trades(*, limit: int = 200) -> list[MockTradeRow]:
     init_db()
     limit = min(max(limit, 1), 2000)

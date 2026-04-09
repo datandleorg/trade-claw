@@ -44,10 +44,14 @@ def underlying_session_chart_png_bytes(
     ema_period: int = ENVELOPE_EMA_PERIOD,
     width: int = 1200,
     height: int = 600,
+    assessment_mode: bool = False,
 ) -> bytes | None:
     """
     Build a single-panel candlestick + EMA envelope (same geometry as ``envelope_breakout_on_last_bar``)
     and return PNG bytes via Kaleido, or ``None`` on failure.
+
+    ``assessment_mode=True``: neutral title for vision breakout review (yellow line = latest bar when
+    ``signal_bar_time`` is unset).
     """
     if df is None or df.empty or len(df) < ema_period:
         return None
@@ -102,9 +106,19 @@ def underlying_session_chart_png_bytes(
             font=dict(color="rgba(255, 230, 100, 0.95)", size=11),
         )
 
-    leg = "CE" if (direction or "").upper().startswith("BULL") else "PE"
+    if assessment_mode:
+        title = (
+            f"{underlying_label} — 1m session (IST) · EMA {ema_period} ±{100 * envelope_pct:.2f}% · "
+            "breakout assessment (yellow line = reference bar)"
+        )
+    else:
+        leg = "CE" if (direction or "").upper().startswith("BULL") else "PE"
+        title = (
+            f"{underlying_label} — 1m session (IST) · EMA {ema_period} ±{100 * envelope_pct:.2f}% · "
+            f"{direction} ({leg})"
+        )
     fig.update_layout(
-        title=f"{underlying_label} — 1m session (IST) · EMA {ema_period} ±{100 * envelope_pct:.2f}% · {direction} ({leg})",
+        title=title,
         template="plotly_dark",
         width=width,
         height=height,

@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import os
 from datetime import UTC, date, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from trade_claw.mock_trade_store import MockTradeRow
 
 import pandas as pd
 from zoneinfo import ZoneInfo
@@ -242,3 +245,73 @@ def fetch_nifty_minute_bars_json(
     return fetch_index_minute_bars_json(
         kite, nse_instruments, session_d, "NIFTY", max_bars=max_bars
     )
+
+
+def session_date_from_trade_entry(entry_time: object | None) -> date:
+    """IST session calendar date from DB ``entry_time`` (naive UTC) or today."""
+    from trade_claw.mock_market_signal import now_ist, session_date_ist
+
+    if entry_time is None:
+        return session_date_ist(now_ist())
+    s = _entry_time_string_for_parse(entry_time)
+    if not s:
+        return session_date_ist(now_ist())
+    s = s.replace("T", " ", 1)
+    if len(s) >= 19:
+        s = s[:19]
+    try:
+        dt = datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+        return dt.date()
+    except ValueError:
+        return session_date_ist(now_ist())
+
+
+def refetch_exit_snapshot_json_for_trade(
+    kite: Any,
+    row: "MockTradeRow",
+    *,
+    nse_instruments: list,
+    nfo_instruments: list,
+) -> tuple[str | None, str | None]:
+    """
+    Re-download option + underlying 1m session slices using the same hold-window rules as exit capture.
+
+    Returns ``(exit_bars_json, exit_underlying_bars_json)``. Either may be ``None`` if Kite returns no data
+    (e.g. expired option) or snapshots are disabled (``MOCK_ENGINE_SNAPSHOT_BARS=0``).
+    """
+    nb = snapshot_bar_count()
+    if nb <= 0:
+        return None, None
+    session_d = session_date_from_trade_entry(row.entry_time)
+    exit_opt: str | None = None
+    inst = (row.instrument or "").strip()
+    if inst:
+        try:
+            exit_opt = fetch_option_minute_bars_json(
+                kite,
+                nfo_instruments,
+                inst,
+                session_d,
+                max_bars=nb,
+                entry_time_sql=row.entry_time,
+                entry_bars_json=row.entry_bars_json,
+                exit_snapshot=True,
+            )
+        except Exception:
+            exit_opt = None
+    exit_u: str | None = None
+    try:
+        ukey = (row.index_underlying or "NIFTY").strip().upper()
+        exit_u = fetch_index_minute_bars_json(
+            kite,
+            nse_instruments,
+            session_d,
+            ukey,
+            max_bars=nb,
+            entry_time_sql=row.entry_time,
+            entry_bars_json=row.entry_underlying_bars_json or row.entry_bars_json,
+            exit_snapshot=True,
+        )
+    except Exception:
+        exit_u = None
+    return exit_opt, exit_u

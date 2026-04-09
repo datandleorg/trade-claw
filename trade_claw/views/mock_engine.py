@@ -18,6 +18,7 @@ import streamlit.components.v1 as components
 from trade_claw import mock_engine_telemetry
 from trade_claw import mock_trade_analytics as mtd_an
 from trade_claw import mock_trade_store
+from trade_claw.refetch_mock_exit_snapshots import refetch_and_persist_exit_snapshots
 from trade_claw.constants import (
     ENVELOPE_EMA_PERIOD,
     FO_INDEX_UNDERLYING_LABELS,
@@ -32,6 +33,7 @@ from trade_claw.mock_market_signal import (
     nse_index_ltp_symbol,
     now_ist,
 )
+from trade_claw.mock_trade_snapshot import snapshot_bar_count
 from trade_claw.plotly_ohlc import (
     add_candlestick_trace,
     add_volume_bar_trace,
@@ -386,6 +388,10 @@ def _render_last_graph_run_panel(run: dict | None, *, key_prefix: str) -> None:
         )
     with g3:
         st.markdown(f"**Trade id** · {run.get('trade_id') or '—'}")
+    sig_llm = run.get("signal_llm_rationale")
+    if sig_llm and str(sig_llm).strip():
+        st.markdown("**LLM breakout (chart)**")
+        st.info(str(sig_llm).strip())
     sig_txt = run.get("signal_text")
     notes_txt = run.get("notes")
     if sig_txt:
@@ -406,7 +412,7 @@ def _render_last_graph_run_panel(run: dict | None, *, key_prefix: str) -> None:
         )
     rat = run.get("llm_rationale")
     if rat:
-        st.markdown("**LLM rationale**")
+        st.markdown("**LLM strike / risk (structured pick)**")
         st.info(str(rat))
     cands = run.get("candidates")
     if cands:
@@ -420,6 +426,7 @@ def _render_last_graph_run_panel(run: dict | None, *, key_prefix: str) -> None:
                 "stop_loss": run.get("stop_loss"),
                 "target": run.get("target"),
                 "rationale": run.get("llm_rationale"),
+                "signal_llm_rationale": run.get("signal_llm_rationale"),
             }
         )
 
@@ -635,16 +642,16 @@ def _mock_analytics_replay_option_title(row, tid: int) -> tuple[str, str]:
     return title, col
 
 
-def _render_mock_analytics() -> None:
+def _render_mock_analytics(kite) -> None:
     mock_trade_store.init_db()
     st.subheader("Multi-month analysis (`mock_trades`)")
     st.caption(
-        "Ledger fields are the source of truth for long horizons. The engine may hold **several OPEN rows at once** "
-        "(**at most one per index** underlying). This tab lists **every** `trade_id` in the date range; **OPEN in range** "
-        "counts all of them. **Replay** is per trade (pick `trade_id`). "
-        "Timestamps are stored as **naive UTC** strings; the range below uses **IST calendar days** "
-        "(Asia/Kolkata) converted to UTC for SQL bounds. "
-        "Kite does not reliably provide old option intraday data — use **snapshots** (env `MOCK_ENGINE_SNAPSHOT_BARS`) for replay."
+        "Ledger fields (prices, PnL, `llm_rationale`, etc.) are the source of truth for long horizons — **not** a full "
+        "tick archive. Minute OHLC for replay lives in JSON columns **`entry_*_bars_json`** / **`exit_*_bars_json`**, "
+        "capped by **`MOCK_ENGINE_SNAPSHOT_BARS`** (entry tail) and **`MOCK_ENGINE_SNAPSHOT_EXIT_MAX_BARS`** (exit hold window). "
+        "The engine may hold **several OPEN rows** (**at most one per index** underlying). **Replay** is per trade. "
+        "Timestamps are **naive UTC**; the date range uses **IST calendar days** → UTC SQL bounds. "
+        "Expired options often cannot be re-fetched from Kite — use **Refetch** or rely on stored JSON."
     )
     today = _session_date_today_ist()
     c0, c1 = st.columns(2)
@@ -761,6 +768,9 @@ def _render_mock_analytics() -> None:
     snap_rows = disp[has_opt | has_u] if not disp.empty else pd.DataFrame()
     if not snap_rows.empty:
         with st.expander("Replay stored minute snapshots (merged entry + exit)", expanded=False):
+            _refetch_flash = "_mock_snap_refetch_ok"
+            if _refetch_flash in st.session_state:
+                st.success(st.session_state.pop(_refetch_flash))
             st.caption(
                 "Option and underlying charts **merge** entry and exit snapshots on one time axis (dedupe by bar time). "
                 "Entry/exit markers match **F&O Options** style. Index spot envelope uses **current** env: "
@@ -770,7 +780,35 @@ def _render_mock_analytics() -> None:
             )
             choices = [int(x) for x in snap_rows["trade_id"].tolist()]
             tid = st.selectbox("trade_id", choices, key="mock_an_snap_tid")
+            _nb_snap = snapshot_bar_count()
+            if _nb_snap <= 0:
+                st.caption("`MOCK_ENGINE_SNAPSHOT_BARS` is **0** — refetch is disabled.")
+            else:
+                if st.button(
+                    "Refetch exit snapshots from Kite & save",
+                    key="mock_an_refetch_exit_snap",
+                    help="Re-downloads option + underlying 1m hold-window OHLC and rewrites `exit_bars_json` / "
+                    "`exit_underlying_bars_json` for this trade. Expired options may not return data (existing JSON kept).",
+                ):
+                    with st.spinner("Refetching from Kite…"):
+                        try:
+                            _rr = refetch_and_persist_exit_snapshots(tid, kite=kite)
+                            if _rr.get("ok"):
+                                st.session_state["_mock_snap_refetch_ok"] = (
+                                    f"Saved trade **{tid}** — option: "
+                                    f"{'updated' if _rr.get('refetched_option') else 'unchanged'}; "
+                                    f"underlying: {'updated' if _rr.get('refetched_underlying') else 'unchanged'}."
+                                )
+                                st.rerun()
+                            else:
+                                st.warning(_rr.get("error") or str(_rr))
+                        except Exception as e:  # noqa: BLE001
+                            st.error(str(e))
             row = snap_rows[snap_rows["trade_id"] == tid].iloc[0]
+            rat_top = _trade_row_get(row, "llm_rationale")
+            if rat_top is not None and str(rat_top).strip():
+                st.markdown("**LLM rationale (stored on trade — breakout + strike)**")
+                st.info(str(rat_top).strip())
             _iu = None
             if "index_underlying" in row.index:
                 v = row["index_underlying"]
@@ -802,11 +840,6 @@ def _render_mock_analytics() -> None:
                     st.warning(f"Could not plot underlying snapshot: {e}")
             else:
                 st.caption("No underlying snapshot (older trades or capture failed).")
-
-            rat = _trade_row_get(row, "llm_rationale")
-            if rat is not None and str(rat).strip():
-                st.markdown("**LLM rationale (at entry)**")
-                st.info(str(rat).strip())
 
             df_oe = _bars_json_to_df(row.get("entry_bars_json"))
             df_ox = _bars_json_to_df(row.get("exit_bars_json"))
@@ -1121,9 +1154,9 @@ def render_mock_engine(kite):
                     "Unrealised",
                     f"₹{u_pnl:,.2f}" if u_pnl is not None else "—",
                 )
-            if r.llm_rationale:
-                st.caption("LLM rationale at entry")
-                st.write(r.llm_rationale)
+            st.markdown("**LLM rationale** (same text stored on the trade row)")
+            _rat_open = (str(r.llm_rationale).strip() if r.llm_rationale else "") or "—"
+            st.info(_rat_open)
             if r.instrument:
                 df_o = _opt_minute_df(kite, nfo, r.instrument, session_d)
                 if df_o is not None and not df_o.empty:
@@ -1310,6 +1343,7 @@ def render_mock_engine(kite):
                     q = int(r.quantity or 1)
                     if ltp_v is not None and ep > 0 and q > 0:
                         unreal_v = (ltp_v - ep) * q
+                _lr = (str(r.llm_rationale).strip() if r.llm_rationale else "") or "—"
                 data.append(
                     {
                         "trade_id": r.trade_id,
@@ -1327,6 +1361,7 @@ def render_mock_engine(kite):
                         "PnL": pnl_f if not st_open else None,
                         "Unrealised PnL": unreal_v,
                         "qty": r.quantity,
+                        "LLM rationale": _lr,
                     }
                 )
 
@@ -1355,6 +1390,7 @@ def render_mock_engine(kite):
                 "PnL": total_real_portfolio,
                 "Unrealised PnL": total_unreal_portfolio,
                 "qty": None,
+                "LLM rationale": "",
             }
             df_book = pd.concat(
                 [pd.DataFrame(data), pd.DataFrame([summary_row])],
@@ -1376,7 +1412,8 @@ def render_mock_engine(kite):
 
             st.caption(
                 "**LTP** / **Unrealised PnL** for **OPEN** legs (live quote). "
-                "**PnL** = realised on **CLOSED**. Last row: all-time realised (closed) + current unrealised (all open legs)."
+                "**PnL** = realised on **CLOSED**. **LLM rationale** is the text persisted on each row (breakout + strike when both exist). "
+                "Last row: all-time realised (closed) + current unrealised (all open legs)."
             )
             fmt = {
                 "entry": "₹{:,.2f}",
@@ -1427,4 +1464,4 @@ def render_mock_engine(kite):
     with tab_live:
         _hud()
     with tab_an:
-        _render_mock_analytics()
+        _render_mock_analytics(kite)
