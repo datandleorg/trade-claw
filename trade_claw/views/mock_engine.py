@@ -292,8 +292,17 @@ def _safe_key_fragment(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", s)[:48] or "x"
 
 
-def _mock_engine_trade_sound_html(steps: list[str]) -> str:
-    """Web Audio: two-tone bell (detection) + square-wave buzzer (execution). ``steps`` = kinds in order."""
+def _sound_bar_token(s: object) -> str:
+    """Match ``mock_engine_run._sound_alert_id_token`` for bar-time fragments in sound hashes."""
+    t = str(s or "").strip()
+    return t.replace(" ", "_").replace(":", "-")
+
+
+def _mock_engine_trade_sound_html(steps: list[dict[str, str]]) -> str:
+    """Web Audio: distinct two-tone bell per detection + buzzer for execution.
+
+    Detection items: ``kind``, ``underlying``, optional ``sig`` (bar id) so each signal uses its own pitch pair.
+    """
     payload = json.dumps(steps)
     return f"""
 <div style="height:0;width:0;overflow:hidden" aria-hidden="true">
@@ -320,9 +329,27 @@ def _mock_engine_trade_sound_html(steps: list[str]) -> str:
     o.start(t0);
     o.stop(t0 + dur + 0.01);
   }}
-  function playDetection(t0) {{
-    toneBurst(t0, 880, 0.2, 0.2, "sine");
-    toneBurst(t0 + 0.16, 1174.66, 0.22, 0.18, "sine");
+  /** Distinct two-tone profiles (Hz); index chosen from underlying name hash. */
+  const DETECTION_PAIRS = [
+    [880, 1174.66], [523.25, 698.46], [659.25, 880.0], [440.0, 554.37], [784.0, 988.0],
+    [392.0, 523.25], [587.33, 783.99], [493.88, 659.25], [349.23, 440.0], [622.25, 830.61],
+    [466.16, 622.25], [554.37, 739.99], [415.3, 554.37], [739.99, 987.77], [329.63, 440.0]
+  ];
+  function hashUnderlying(s) {{
+    const t = String(s || "default");
+    let h = 0;
+    for (let i = 0; i < t.length; i++) {{
+      h = ((h << 5) - h) + t.charCodeAt(i);
+      h |= 0;
+    }}
+    return Math.abs(h);
+  }}
+  function playDetection(t0, underlying, sigToken) {{
+    const key = String(underlying || "x") + "|" + String(sigToken || "");
+    const idx = hashUnderlying(key) % DETECTION_PAIRS.length;
+    const f = DETECTION_PAIRS[idx];
+    toneBurst(t0, f[0], 0.2, 0.2, "sine");
+    toneBurst(t0 + 0.16, f[1], 0.22, 0.18, "sine");
   }}
   function playExecution(t0) {{
     toneBurst(t0, 220, 0.32, 0.42, "square");
@@ -330,9 +357,12 @@ def _mock_engine_trade_sound_html(steps: list[str]) -> str:
   }}
   let nextT = ctx.currentTime + 0.06;
   for (let i = 0; i < steps.length; i++) {{
-    const k = steps[i];
+    const step = steps[i];
+    const k = step && step.kind;
+    const u = step && step.underlying ? String(step.underlying) : "";
+    const sig = step && step.sig ? String(step.sig) : "";
     if (k === "detection") {{
-      playDetection(nextT);
+      playDetection(nextT, u, sig);
       nextT += 0.52;
     }} else if (k === "execution") {{
       playExecution(nextT);
@@ -959,7 +989,8 @@ def render_mock_engine(kite):
                 "Trade bells (detection + execution)",
                 value=True,
                 key="mock_eng_trade_bells",
-                help="Bell tones when the worker sees an envelope breakout; buzzer when a mock trade is inserted. "
+                help="Each **detection** uses a two-tone bell chosen from **underlying + signal bar** (distinct per "
+                "scrip and per new breakout). **Execution** keeps the same buzzer. "
                 "Some browsers mute Web Audio until you interact with the tab.",
             )
 
@@ -967,7 +998,7 @@ def render_mock_engine(kite):
         if not isinstance(raw_sound, list):
             raw_sound = []
         seen_ids: set = st.session_state.mock_engine_sound_seen_ids
-        play_kinds: list[str] = []
+        play_steps: list[dict[str, str]] = []
         for item in raw_sound:
             if not isinstance(item, dict):
                 continue
@@ -978,9 +1009,13 @@ def render_mock_engine(kite):
             if aid in seen_ids:
                 continue
             seen_ids.add(aid)
-            play_kinds.append(str(kind))
-        if bells_on and play_kinds:
-            components.html(_mock_engine_trade_sound_html(play_kinds), height=0)
+            u_sound = str(item.get("underlying") or "").strip().upper()
+            step_d: dict[str, str] = {"kind": str(kind), "underlying": u_sound}
+            if kind == "detection":
+                step_d["sig"] = _sound_bar_token(item.get("signal_bar_time"))
+            play_steps.append(step_d)
+        if bells_on and play_steps:
+            components.html(_mock_engine_trade_sound_html(play_steps), height=0)
 
         open_rows = mock_trade_store.list_open_trades()
         und = mock_engine_underlyings()
