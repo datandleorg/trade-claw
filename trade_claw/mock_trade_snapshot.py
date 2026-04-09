@@ -6,9 +6,9 @@ import json
 import os
 from datetime import UTC, date, datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import pandas as pd
+from zoneinfo import ZoneInfo
 
 from trade_claw.fo_support import fetch_underlying_intraday
 from trade_claw.market_data import candles_to_dataframe
@@ -38,16 +38,60 @@ def _session_bounds(session_d: date) -> tuple[str, str]:
     return from_dt.strftime("%Y-%m-%d %H:%M:%S"), to_dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _parse_entry_utc(entry_time_sql: str) -> pd.Timestamp | None:
-    s = (entry_time_sql or "").strip()
+def _entry_time_string_for_parse(raw: object | None) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, datetime):
+        if raw.tzinfo is not None:
+            return raw.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        return raw.strftime("%Y-%m-%d %H:%M:%S")
+    return str(raw).strip()
+
+
+def _parse_entry_utc(entry_time_raw: object | None) -> pd.Timestamp | None:
+    """Parse DB ``entry_time`` (naive UTC wall per ``mock_trade_store``) to UTC timestamp."""
+    s = _entry_time_string_for_parse(entry_time_raw)
     if not s:
         return None
-    if len(s) >= 19:
-        s = s[:19]
     t = pd.to_datetime(s, utc=True, errors="coerce")
     if pd.isna(t):
         return None
     return t
+
+
+def _min_bar_utc_from_bars_json(raw: str | None) -> pd.Timestamp | None:
+    """Earliest bar time in stored entry snapshot, as UTC (same convention as ``_bars_utc_series``)."""
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        bars = json.loads(str(raw))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not bars:
+        return None
+    dfp = pd.DataFrame(bars)
+    if dfp.empty or "date" not in dfp.columns:
+        return None
+    dfp = dfp.copy()
+    dfp["date"] = pd.to_datetime(dfp["date"], errors="coerce")
+    dfp = dfp.dropna(subset=["date"])
+    if dfp.empty:
+        return None
+    su = _bars_utc_series(dfp)
+    mi = su.min()
+    if pd.isna(mi):
+        return None
+    return pd.Timestamp(mi)
+
+
+def _entry_threshold_utc(
+    entry_time_sql: object | None,
+    entry_bars_json: str | None,
+) -> pd.Timestamp | None:
+    u = _parse_entry_utc(entry_time_sql)
+    if u is not None:
+        return u
+    return _min_bar_utc_from_bars_json(entry_bars_json)
 
 
 def _bars_utc_series(df: pd.DataFrame) -> pd.Series:
@@ -61,23 +105,28 @@ def _trim_snapshot_df(
     df: pd.DataFrame,
     *,
     max_bars: int,
-    entry_time_sql: str | None,
-    exit_hold: bool,
+    exit_snapshot: bool,
+    entry_time_sql: object | None,
+    entry_bars_json: str | None,
 ) -> pd.DataFrame:
-    """Tail to ``max_bars`` for entry snapshots; exit snapshots = bars from entry time through session end, capped."""
+    """
+    Entry snapshots: last ``max_bars`` of session.
+
+    Exit snapshots: bars from trade entry (``entry_time`` or earliest ``entry_bars_json`` bar) through
+    session end, capped by ``snapshot_exit_hold_max_bars``. If no threshold can be resolved, keep the
+    **full** session up to that cap (never the last-N tail of the whole day — that hid the hold window).
+    """
     df = df.sort_values("date").reset_index(drop=True)
-    if exit_hold and (entry_time_sql or "").strip():
-        entry_u = _parse_entry_utc(entry_time_sql or "")
+    if exit_snapshot:
         cap = snapshot_exit_hold_max_bars()
+        entry_u = _entry_threshold_utc(entry_time_sql, entry_bars_json)
         if entry_u is not None:
             bar_u = _bars_utc_series(df)
             df = df.loc[bar_u >= entry_u].reset_index(drop=True)
-        else:
-            cap = max(1, max_bars) if max_bars > 0 else snapshot_exit_hold_max_bars()
     else:
         cap = max(0, max_bars)
-    if cap <= 0:
-        return df.iloc[0:0]
+        if cap <= 0:
+            return df.iloc[0:0]
     if len(df) > cap:
         df = df.iloc[-cap:].reset_index(drop=True)
     return df
@@ -108,12 +157,16 @@ def fetch_option_minute_bars_json(
     session_d: date,
     *,
     max_bars: int,
-    entry_time_sql: str | None = None,
+    entry_time_sql: object | None = None,
+    entry_bars_json: str | None = None,
+    exit_snapshot: bool = False,
 ) -> str | None:
-    exit_hold = bool((entry_time_sql or "").strip())
     if not tradingsymbol or not nfo_instruments:
         return None
-    if not exit_hold and max_bars <= 0:
+    if exit_snapshot:
+        if snapshot_bar_count() <= 0:
+            return None
+    elif max_bars <= 0:
         return None
     token = None
     for i in nfo_instruments:
@@ -133,8 +186,9 @@ def fetch_option_minute_bars_json(
     df = _trim_snapshot_df(
         df,
         max_bars=max_bars,
+        exit_snapshot=exit_snapshot,
         entry_time_sql=entry_time_sql,
-        exit_hold=exit_hold,
+        entry_bars_json=entry_bars_json,
     )
     return _df_to_ohlc_json_rows(df)
 
@@ -146,13 +200,17 @@ def fetch_index_minute_bars_json(
     underlying_key: str,
     *,
     max_bars: int,
-    entry_time_sql: str | None = None,
+    entry_time_sql: object | None = None,
+    entry_bars_json: str | None = None,
+    exit_snapshot: bool = False,
 ) -> str | None:
-    """Index spot 1m session bars (09:15–15:30). Exit: optional ``entry_time_sql`` → hold window, else last ``max_bars``."""
-    exit_hold = bool((entry_time_sql or "").strip())
+    """Index spot 1m session bars (09:15–15:30). ``exit_snapshot=True`` → hold window from entry."""
     if not nse_instruments or not (underlying_key or "").strip():
         return None
-    if not exit_hold and max_bars <= 0:
+    if exit_snapshot:
+        if snapshot_bar_count() <= 0:
+            return None
+    elif max_bars <= 0:
         return None
     from_str, to_str = _session_bounds(session_d)
     try:
@@ -166,8 +224,9 @@ def fetch_index_minute_bars_json(
     df = _trim_snapshot_df(
         df,
         max_bars=max_bars,
+        exit_snapshot=exit_snapshot,
         entry_time_sql=entry_time_sql,
-        exit_hold=exit_hold,
+        entry_bars_json=entry_bars_json,
     )
     return _df_to_ohlc_json_rows(df)
 

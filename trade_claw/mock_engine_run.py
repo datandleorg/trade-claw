@@ -153,6 +153,8 @@ def _close_at_ltp(
                     sd,
                     max_bars=nb,
                     entry_time_sql=row.entry_time,
+                    entry_bars_json=row.entry_bars_json,
+                    exit_snapshot=True,
                 )
             except Exception:  # noqa: BLE001
                 exit_snap = None
@@ -166,6 +168,8 @@ def _close_at_ltp(
                 ukey,
                 max_bars=nb,
                 entry_time_sql=row.entry_time,
+                entry_bars_json=row.entry_underlying_bars_json or row.entry_bars_json,
+                exit_snapshot=True,
             )
         except Exception:  # noqa: BLE001
             exit_under_snap = None

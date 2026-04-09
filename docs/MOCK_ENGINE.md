@@ -200,7 +200,7 @@ Core columns match the product blueprint; two extra columns support realistic Pn
 | `lot_size` | Exchange lot size used for sizing |
 | `quantity` | Total units (lots × lot size) for PnL |
 | `index_underlying` | NSE index key used for the signal (`NIFTY`, `BANKNIFTY`, …); nullable on legacy rows; **unique among `OPEN` rows** when the partial index is present |
-| `entry_bars_json` / `exit_bars_json` | Optional JSON arrays of **option** minute OHLC: **entry** = trailing window (`MOCK_ENGINE_SNAPSHOT_BARS`); **exit** = bars from **`entry_time`** through session at close, capped by **`MOCK_ENGINE_SNAPSHOT_EXIT_MAX_BARS`** |
+| `entry_bars_json` / `exit_bars_json` | Optional JSON arrays of **option** minute OHLC: **entry** = trailing window (`MOCK_ENGINE_SNAPSHOT_BARS`); **exit** = bars from **`entry_time`** (UTC per `mock_trade_store`) through session at close, capped by **`MOCK_ENGINE_SNAPSHOT_EXIT_MAX_BARS`**. If `entry_time` is unparseable, the earliest bar in **`entry_bars_json`** / **`entry_underlying_bars_json`** is used as the start; if neither yields a threshold, the **full** session up to the cap is stored (not a last-N tail of the day). |
 | `entry_underlying_bars_json` / `exit_underlying_bars_json` | Optional JSON arrays of **underlying spot** minute OHLC (same entry vs exit rules as option snapshots) |
 
 WAL allows concurrent **writer** (Celery) and **reader** (Streamlit).
