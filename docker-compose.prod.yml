@@ -66,6 +66,7 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       KITE_SESSION_FILE: /app/data/.kite_session.json
+      
     depends_on:
       redis:
         condition: service_healthy

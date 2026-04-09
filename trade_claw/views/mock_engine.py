@@ -392,6 +392,24 @@ def _render_last_graph_run_panel(run: dict | None, *, key_prefix: str) -> None:
     if sig_llm and str(sig_llm).strip():
         st.markdown("**LLM breakout (chart)**")
         st.info(str(sig_llm).strip())
+    und0 = str(run.get("underlying") or "").strip().upper()
+    wk_pct = run.get("signal_envelope_pct")
+    if wk_pct is not None and und0:
+        try:
+            wk_f = float(wk_pct)
+            ui_f = float(mock_agent_envelope_pct_for_underlying(und0))
+            st.caption(
+                f"Worker envelope **this tick** (each side of EMA{ENVELOPE_EMA_PERIOD}): **{100 * wk_f:.3f}%**"
+            )
+            if abs(wk_f - ui_f) > 1e-15:
+                st.warning(
+                    f"This Streamlit session resolves **`{und0}`** as **{100 * ui_f:.3f}%** per side (your `.env` here). "
+                    "The **Celery worker** used a different value, so the message above can disagree with the spot chart. "
+                    "Copy **`MOCK_AGENT_ENVELOPE_PCT`** / **`MOCK_AGENT_INDEX_ENVELOPE_PCT`** into the worker environment "
+                    "(Docker Compose `env_file`, systemd unit, etc.)."
+                )
+        except (TypeError, ValueError):
+            pass
     sig_txt = run.get("signal_text")
     notes_txt = run.get("notes")
     if sig_txt:
@@ -427,6 +445,7 @@ def _render_last_graph_run_panel(run: dict | None, *, key_prefix: str) -> None:
                 "target": run.get("target"),
                 "rationale": run.get("llm_rationale"),
                 "signal_llm_rationale": run.get("signal_llm_rationale"),
+                "signal_envelope_pct": run.get("signal_envelope_pct"),
             }
         )
 

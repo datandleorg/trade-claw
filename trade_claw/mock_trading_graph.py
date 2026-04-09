@@ -159,6 +159,7 @@ class TradingState(TypedDict, total=False):
     target: float
     llm_rationale: str
     signal_llm_rationale: str
+    signal_envelope_pct: float
     trade_id: int
 
 
@@ -275,10 +276,12 @@ def build_mock_trading_graph(
             "signal_bar_time": sbt,
             "signal_text": f"{u}: LLM chart breakout — {rat}" if rat else f"{u}: LLM chart breakout",
             "signal_llm_rationale": rat,
+            "signal_envelope_pct": pct,
         }
 
     def signal_node(state: TradingState) -> TradingState:
         parts: list[str] = []
+        last_scanned_pct: float | None = None
         focus = (state.get("signal_underlying") or "").strip().upper()
         allowed = mock_engine_underlyings()
         if focus:
@@ -301,6 +304,7 @@ def build_mock_trading_graph(
                 parts.append(f"{u}: {err or 'no data'}")
                 continue
             pct = mock_agent_envelope_pct_for_underlying(u)
+            last_scanned_pct = pct
             if mock_llm_breakout_from_chart():
                 if not mock_llm_attach_underlying_chart():
                     scan_warning(
@@ -344,12 +348,16 @@ def build_mock_trading_graph(
                     "spot": float(sig["spot"] or 0),
                     "signal_bar_time": sig.get("signal_bar_time") or "",
                     "signal_text": text,
+                    "signal_envelope_pct": pct,
                 }
             parts.append(f"{u}: {text}")
         combined = " | ".join(parts)
         if len(combined) > 6000:
             combined = combined[:5997] + "..."
-        return {"notes": combined, "signal_text": combined}
+        out_end: dict[str, Any] = {"notes": combined, "signal_text": combined}
+        if last_scanned_pct is not None:
+            out_end["signal_envelope_pct"] = last_scanned_pct
+        return out_end
 
     def candidates_node(state: TradingState) -> TradingState:
         if state.get("error") or not state.get("direction"):
