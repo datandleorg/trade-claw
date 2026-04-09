@@ -20,7 +20,6 @@ from pydantic import BaseModel, Field
 from trade_claw.constants import ENVELOPE_EMA_PERIOD, FO_INDEX_UNDERLYING_LABELS
 from trade_claw.env_trading_params import (
     mock_llm_attach_underlying_chart,
-    mock_llm_breakout_from_chart,
     mock_llm_prompt_log_dir,
     mock_llm_risk_instruction,
     mock_llm_sltp_fallback_to_env,
@@ -30,9 +29,18 @@ from trade_claw.env_trading_params import (
     option_stop_premium_fraction,
     option_target_premium_fraction,
 )
+from trade_claw.mock_llm_flow_log import (
+    create_flow_run_dir,
+    update_flow_deterministic,
+    write_flow_candidates_json,
+    write_flow_deterministic,
+    write_flow_outcome,
+)
 from trade_claw.mock_llm_prompt_log import (
+    write_breakout_assessment_log,
     write_llm_invoke_error_log,
     write_llm_structured_output_log,
+    write_llm_turn_snapshot,
     write_signal_llm_turn_log,
 )
 from trade_claw.mock_llm_signal_chart import underlying_session_chart_png_bytes
@@ -161,6 +169,9 @@ class TradingState(TypedDict, total=False):
     signal_llm_rationale: str
     signal_envelope_pct: float
     trade_id: int
+    llm_flow_id: str
+    llm_flow_dir: str
+    vision_validation_status: str
 
 
 def _openai_creds() -> tuple[str, str]:
@@ -184,42 +195,58 @@ def build_mock_trading_graph(
     structured = llm.with_structured_output(LLMPick)
 
     _LLM_BREAKOUT_REJECT = "__llm_breakout_reject__"
+    _VISION_INVOKE_FALLBACK = "__vision_invoke_fallback__"
 
-    def _llm_assess_envelope_breakout(
-        u: str, df: pd.DataFrame, pct: float, parts: list[str]
-    ) -> dict[str, Any] | None | str:
+    def _llm_validate_envelope_breakout(
+        u: str,
+        df: pd.DataFrame,
+        pct: float,
+        parts: list[str],
+        provisional: dict[str, Any],
+        vision_log_dir: Path | None,
+        *,
+        chart_png: bytes | None = None,
+    ) -> dict[str, Any] | str:
         """
-        Vision assessment. Returns:
-        - ``dict`` → emit as signal state;
-        - ``_LLM_BREAKOUT_REJECT`` → model declined (no deterministic envelope for this underlying this tick);
-        - ``None`` → chart/API unusable → caller should fall back to ``envelope_breakout_on_last_bar``.
+        Vision **validation** after a deterministic envelope signal. Returns:
+        - ``dict`` → confirmed signal state;
+        - ``_LLM_BREAKOUT_REJECT`` → model vetoes (no trade this underlying);
+        - ``_VISION_INVOKE_FALLBACK`` → API error (caller uses deterministic fallback).
         """
         idx_label = FO_INDEX_UNDERLYING_LABELS.get(u, u)
-        chart_png = underlying_session_chart_png_bytes(
-            df,
-            envelope_pct=pct,
-            signal_bar_time=None,
-            underlying_label=idx_label,
-            direction="",
-            assessment_mode=True,
-        )
         if chart_png is None:
-            return None
+            chart_png = underlying_session_chart_png_bytes(
+                df,
+                envelope_pct=pct,
+                signal_bar_time=None,
+                underlying_label=idx_label,
+                direction="",
+                assessment_mode=True,
+            )
+        if chart_png is None:
+            return _VISION_INVOKE_FALLBACK
+        pd_dir = str(provisional.get("direction") or "")
+        pd_leg = str(provisional.get("leg") or "")
         sys_b = SystemMessage(
             content=(
                 f"You review an NSE underlying **1-minute** spot chart for **{idx_label}**. "
                 f"Candles are OHLC; curves are **EMA {ENVELOPE_EMA_PERIOD}** and **±{100 * pct:.3f}%** envelope "
                 "(same geometry as the mock engine). A **yellow vertical line** marks the **latest bar**.\n"
-                "Set **breakout=true** only if the **last completed candle** shows a **fresh** breakout: "
-                "**BULLISH** = close clearly **above** the upper band (not merely hugging from inside); "
-                "**BEARISH** = close clearly **below** the lower band.\n"
-                "If price is inside the band, ambiguous, or only a touch without a decisive close outside, "
-                "set **breakout=false**. **direction** must be BULLISH or BEARISH when breakout is true; "
-                "**leg** must be CE or PE accordingly. **rationale** must cite what you see on the chart."
+                "The **rule-based mock engine** has already flagged a **fresh envelope breakout**: "
+                f"**{pd_dir}** (long **{pd_leg}**). Your job is to **confirm or reject** that assessment from the image.\n"
+                "Set **breakout=true** only if the **last completed candle** clearly supports that breakout: "
+                "**BULLISH** = close clearly **above** the upper band; **BEARISH** = close clearly **below** the lower band.\n"
+                "If you disagree, the chart is ambiguous, or the move is not a decisive close outside the band, "
+                "set **breakout=false**. When **breakout=true**, **direction** / **leg** must match what you see "
+                "(BULLISH/CE or BEARISH/PE). **rationale** must cite the chart."
             )
         )
         last_close = float(df["close"].iloc[-1])
-        hum_txt = f"Underlying {u} ({idx_label}). Last close ≈ {last_close:.2f}. Assess breakout from the image."
+        hum_txt = (
+            f"Underlying {u} ({idx_label}). Last close ≈ {last_close:.2f}.\n\n"
+            f"**Deterministic rule summary:**\n{provisional.get('text', '')}\n\n"
+            "Confirm (**breakout=true**) or reject (**breakout=false**) this breakout using the chart image."
+        )
         b64 = base64.standard_b64encode(chart_png).decode("ascii")
         human = HumanMessage(
             content=[
@@ -231,10 +258,36 @@ def build_mock_trading_graph(
         llm_br = ChatOpenAI(
             api_key=key, model=invoke_model, temperature=0.1, max_completion_tokens=700
         ).with_structured_output(LLMBreakoutAssessment)
-        out: LLMBreakoutAssessment = llm_br.invoke([sys_b, human])
+        vdir = vision_log_dir
+        if vdir is not None:
+            sys_t = sys_b.content if isinstance(sys_b.content, str) else json.dumps(sys_b.content)
+            write_llm_turn_snapshot(
+                vdir,
+                system_text=sys_t,
+                human_text=hum_txt,
+                chart_png=chart_png,
+                meta={
+                    "llm_flow": "breakout_validation",
+                    "underlying": u,
+                    "invoke_model": invoke_model,
+                    "envelope_pct": pct,
+                    "envelope_ema_period": ENVELOPE_EMA_PERIOD,
+                    "provisional_direction": pd_dir,
+                    "provisional_leg": pd_leg,
+                },
+            )
+        try:
+            out: LLMBreakoutAssessment = llm_br.invoke([sys_b, human])
+        except Exception as e:  # noqa: BLE001
+            scan_warning("graph_err", "LLM vision validate failed underlying=%s: %s", u, e)
+            if vdir is not None:
+                write_llm_invoke_error_log(vdir, str(e), exc_type=type(e).__name__)
+            return _VISION_INVOKE_FALLBACK
         rat = (out.rationale or "").strip()
+        if vdir is not None:
+            write_breakout_assessment_log(vdir, out, invoke_path="multimodal")
         if not out.breakout:
-            parts.append(f"{u}: LLM no breakout — {rat[:320]}" if rat else f"{u}: LLM no breakout")
+            parts.append(f"{u}: LLM veto breakout — {rat[:320]}" if rat else f"{u}: LLM veto breakout")
             return _LLM_BREAKOUT_REJECT
         d = (out.direction or "").strip().upper()
         leg_m = (out.leg or "").strip().upper()
@@ -247,21 +300,23 @@ def build_mock_trading_graph(
         if direction is None or leg is None:
             scan_warning(
                 "graph_err",
-                "LLM breakout inconsistent underlying=%s direction=%r leg=%r",
+                "LLM validate inconsistent underlying=%s direction=%r leg=%r",
                 u,
                 out.direction,
                 out.leg,
             )
-            parts.append(f"{u}: LLM breakout parse failed — {rat[:200]}" if rat else f"{u}: LLM breakout parse failed")
+            parts.append(f"{u}: LLM validate parse failed — {rat[:200]}" if rat else f"{u}: LLM validate parse failed")
             return _LLM_BREAKOUT_REJECT
-        spot = float(df["close"].iloc[-1])
+        spot = float(provisional.get("spot") or df["close"].iloc[-1])
         sbt = (out.signal_bar_time or "").strip()
+        if not sbt:
+            sbt = str(provisional.get("signal_bar_time") or "").strip()
         if not sbt:
             last_dt = df["date"].iloc[-1]
             sbt = last_dt.isoformat() if hasattr(last_dt, "isoformat") else str(last_dt)
         scan_info(
             "signal",
-            "SIGNAL_LLM underlying=%s direction=%s leg=%s spot=%.2f bar=%s",
+            "SIGNAL_VISION_OK underlying=%s direction=%s leg=%s spot=%.2f bar=%s",
             u,
             direction,
             leg,
@@ -274,7 +329,7 @@ def build_mock_trading_graph(
             "leg": leg,
             "spot": spot,
             "signal_bar_time": sbt,
-            "signal_text": f"{u}: LLM chart breakout — {rat}" if rat else f"{u}: LLM chart breakout",
+            "signal_text": f"{u}: vision confirmed — {rat}" if rat else f"{u}: vision confirmed",
             "signal_llm_rationale": rat,
             "signal_envelope_pct": pct,
         }
@@ -298,6 +353,9 @@ def build_mock_trading_graph(
             indices_to_scan = [focus]
         else:
             indices_to_scan = list(allowed)
+        log_root_str = mock_llm_prompt_log_dir()
+        log_root = Path(log_root_str).expanduser().resolve() if log_root_str else None
+
         for u in indices_to_scan:
             df, err = load_index_session_minute_df(kite, nse_instruments, session_d, u)
             if df is None or err:
@@ -305,52 +363,139 @@ def build_mock_trading_graph(
                 continue
             pct = mock_agent_envelope_pct_for_underlying(u)
             last_scanned_pct = pct
-            if mock_llm_breakout_from_chart():
-                if not mock_llm_attach_underlying_chart():
-                    scan_warning(
-                        "graph_err",
-                        "MOCK_LLM_BREAKOUT_FROM_CHART requires MOCK_LLM_ATTACH_UNDERLYING_CHART=1; "
-                        "using deterministic envelope only underlying=%s",
-                        u,
-                    )
-                else:
-                    try:
-                        llm_res = _llm_assess_envelope_breakout(u, df, pct, parts)
-                    except Exception as e:  # noqa: BLE001
-                        scan_warning(
-                            "graph_err",
-                            "LLM breakout invoke failed underlying=%s: %s; envelope fallback",
-                            u,
-                            e,
-                        )
-                        llm_res = None
-                    if isinstance(llm_res, dict):
-                        return llm_res
-                    if llm_res == _LLM_BREAKOUT_REJECT:
-                        continue
             ok, text, sig = envelope_breakout_on_last_bar(
                 df, ema_period=ENVELOPE_EMA_PERIOD, pct=pct
             )
-            if ok and sig.get("direction"):
-                scan_info(
-                    "signal",
-                    "SIGNAL underlying=%s direction=%s leg=%s spot=%.2f bar=%s",
-                    u,
-                    sig["direction"],
-                    sig["leg"],
-                    float(sig["spot"] or 0),
-                    sig.get("signal_bar_time") or "",
+            if not ok or not sig.get("direction"):
+                parts.append(f"{u}: {text}")
+                continue
+
+            provisional = {
+                "direction": sig["direction"],
+                "leg": sig["leg"],
+                "spot": float(sig["spot"] or 0),
+                "signal_bar_time": sig.get("signal_bar_time") or "",
+                "text": text,
+            }
+            flow_dir_p: Path | None = None
+            flow_id_str: str | None = None
+            if log_root is not None:
+                flow_id_str, flow_dir_p = create_flow_run_dir(
+                    log_root, session_d=session_d, ist_now=now_ist()
                 )
-                return {
-                    "underlying": u,
-                    "direction": sig["direction"],
-                    "leg": sig["leg"],
-                    "spot": float(sig["spot"] or 0),
-                    "signal_bar_time": sig.get("signal_bar_time") or "",
-                    "signal_text": text,
-                    "signal_envelope_pct": pct,
-                }
-            parts.append(f"{u}: {text}")
+                write_flow_deterministic(
+                    flow_dir_p,
+                    {
+                        "underlying": u,
+                        "envelope_pct": pct,
+                        "text": text,
+                        "sig": {
+                            "direction": sig.get("direction"),
+                            "leg": sig.get("leg"),
+                            "spot": float(sig["spot"] or 0),
+                            "signal_bar_time": sig.get("signal_bar_time"),
+                        },
+                        "vision_validation_status": "pending_vision",
+                    },
+                )
+
+            vision_sub = flow_dir_p / "vision" if flow_dir_p is not None else None
+            chart_png: bytes | None = None
+            if mock_llm_attach_underlying_chart():
+                chart_png = underlying_session_chart_png_bytes(
+                    df,
+                    envelope_pct=pct,
+                    signal_bar_time=None,
+                    underlying_label=FO_INDEX_UNDERLYING_LABELS.get(u, u),
+                    direction="",
+                    assessment_mode=True,
+                )
+
+            if chart_png is not None:
+                vres = _llm_validate_envelope_breakout(
+                    u, df, pct, parts, provisional, vision_sub, chart_png=chart_png
+                )
+                if vres == _LLM_BREAKOUT_REJECT:
+                    if flow_dir_p is not None:
+                        update_flow_deterministic(
+                            flow_dir_p, {"vision_validation_status": "vetoed_vision"}
+                        )
+                    continue
+                if vres == _VISION_INVOKE_FALLBACK:
+                    if flow_dir_p is not None:
+                        update_flow_deterministic(
+                            flow_dir_p, {"vision_validation_status": "fallback_error"}
+                        )
+                    scan_info(
+                        "signal",
+                        "SIGNAL underlying=%s direction=%s leg=%s spot=%.2f bar=%s (vision fallback)",
+                        u,
+                        sig["direction"],
+                        sig["leg"],
+                        float(sig["spot"] or 0),
+                        sig.get("signal_bar_time") or "",
+                    )
+                    fb: dict[str, Any] = {
+                        "underlying": u,
+                        "direction": sig["direction"],
+                        "leg": sig["leg"],
+                        "spot": float(sig["spot"] or 0),
+                        "signal_bar_time": sig.get("signal_bar_time") or "",
+                        "signal_text": text,
+                        "signal_envelope_pct": pct,
+                        "signal_llm_rationale": (
+                            "Rule-based envelope breakout only: vision LLM call failed; "
+                            "using deterministic signal."
+                        ),
+                        "vision_validation_status": "fallback_error",
+                    }
+                    if flow_id_str and flow_dir_p is not None:
+                        fb["llm_flow_id"] = flow_id_str
+                        fb["llm_flow_dir"] = str(flow_dir_p)
+                    return fb
+                if isinstance(vres, dict):
+                    if flow_dir_p is not None:
+                        update_flow_deterministic(
+                            flow_dir_p, {"vision_validation_status": "confirmed_vision"}
+                        )
+                    vres["vision_validation_status"] = "confirmed_vision"
+                    if flow_id_str and flow_dir_p is not None:
+                        vres["llm_flow_id"] = flow_id_str
+                        vres["llm_flow_dir"] = str(flow_dir_p)
+                    return vres
+
+            if flow_dir_p is not None:
+                update_flow_deterministic(
+                    flow_dir_p, {"vision_validation_status": "skipped_no_chart"}
+                )
+            scan_info(
+                "signal",
+                "SIGNAL underlying=%s direction=%s leg=%s spot=%.2f bar=%s (vision skipped)",
+                u,
+                sig["direction"],
+                sig["leg"],
+                float(sig["spot"] or 0),
+                sig.get("signal_bar_time") or "",
+            )
+            skip_out: dict[str, Any] = {
+                "underlying": u,
+                "direction": sig["direction"],
+                "leg": sig["leg"],
+                "spot": float(sig["spot"] or 0),
+                "signal_bar_time": sig.get("signal_bar_time") or "",
+                "signal_text": text,
+                "signal_envelope_pct": pct,
+                "signal_llm_rationale": (
+                    "Rule-based envelope breakout only: vision validation skipped "
+                    "(chart attach off or PNG unavailable)."
+                ),
+                "vision_validation_status": "skipped_no_chart",
+            }
+            if flow_id_str and flow_dir_p is not None:
+                skip_out["llm_flow_id"] = flow_id_str
+                skip_out["llm_flow_dir"] = str(flow_dir_p)
+            return skip_out
+
         combined = " | ".join(parts)
         if len(combined) > 6000:
             combined = combined[:5997] + "..."
@@ -405,7 +550,11 @@ def build_mock_trading_graph(
                     "ltp": float(ltp) if ltp is not None else None,
                 }
             )
-        return {"candidates": enriched}
+        out_c: dict[str, Any] = {"candidates": enriched}
+        lf = (state.get("llm_flow_dir") or "").strip()
+        if lf:
+            write_flow_candidates_json(Path(lf), enriched)
+        return out_c
 
     def llm_node(state: TradingState) -> TradingState:
         if state.get("error") or not state.get("candidates"):
@@ -504,8 +653,41 @@ def build_mock_trading_graph(
         ).with_structured_output(LLMPick)
         prompt_log_run_dir: Path | None = None
         log_root = mock_llm_prompt_log_dir()
-        if log_root:
-            sys_content = sys.content if isinstance(sys.content, str) else json.dumps(sys.content)
+        flow_dir_s = (state.get("llm_flow_dir") or "").strip()
+        meta_strike: dict[str, Any] = {
+            "llm_flow": "strike_pick",
+            "openai_model_default": model,
+            "invoke_model": invoke_model,
+            "direction": state.get("direction"),
+            "leg": state.get("leg"),
+            "spot": state.get("spot"),
+            "signal_bar_time": state.get("signal_bar_time"),
+            "signal_text": (state.get("signal_text") or "")[:4000],
+            "envelope_pct": envelope_pct_u,
+            "envelope_ema_period": ENVELOPE_EMA_PERIOD,
+            "signal_llm_rationale": (state.get("signal_llm_rationale") or "")[:4000],
+            "vision_validation_status": (state.get("vision_validation_status") or "")[:120],
+        }
+        sys_content = sys.content if isinstance(sys.content, str) else json.dumps(sys.content)
+        if flow_dir_s:
+            strike_dir = Path(flow_dir_s) / "strike"
+            if write_llm_turn_snapshot(
+                strike_dir,
+                system_text=sys_content,
+                human_text=text_block,
+                chart_png=chart_png,
+                meta=meta_strike,
+            ):
+                prompt_log_run_dir = strike_dir
+                scan_info("llm_prompt_log", "LLM strike trace underlying=%s dir=%s", idx, strike_dir)
+            else:
+                scan_warning(
+                    "graph_err",
+                    "LLM strike log write failed underlying=%s dir=%s",
+                    idx,
+                    strike_dir,
+                )
+        elif log_root:
             prompt_log_run_dir = write_signal_llm_turn_log(
                 Path(log_root),
                 ist_now=now_ist(),
@@ -514,18 +696,7 @@ def build_mock_trading_graph(
                 system_text=sys_content,
                 human_text=text_block,
                 chart_png=chart_png,
-                meta={
-                    "openai_model_default": model,
-                    "invoke_model": invoke_model,
-                    "direction": state.get("direction"),
-                    "leg": state.get("leg"),
-                    "spot": state.get("spot"),
-                    "signal_bar_time": state.get("signal_bar_time"),
-                    "signal_text": (state.get("signal_text") or "")[:4000],
-                    "envelope_pct": envelope_pct_u,
-                    "envelope_ema_period": ENVELOPE_EMA_PERIOD,
-                    "signal_llm_rationale": (state.get("signal_llm_rationale") or "")[:4000],
-                },
+                meta=meta_strike,
             )
             if prompt_log_run_dir:
                 scan_info("llm_prompt_log", "LLM prompt trace underlying=%s dir=%s", idx, prompt_log_run_dir)
@@ -618,11 +789,21 @@ def build_mock_trading_graph(
     def execute_node(state: TradingState) -> TradingState:
         if state.get("error") or not state.get("llm_tradingsymbol"):
             return {}
+        flow_out_p: Path | None = None
+        lf_e = (state.get("llm_flow_dir") or "").strip()
+        if lf_e and mock_llm_prompt_log_dir():
+            flow_out_p = Path(lf_e)
+
+        def _flow_done(tid: int | None = None, err: str | None = None) -> None:
+            if flow_out_p is not None:
+                write_flow_outcome(flow_out_p, trade_id=tid, error=err)
+
         tsym = state["llm_tradingsymbol"]
         cands = state.get("candidates") or []
         meta = next((c for c in cands if c.get("tradingsymbol") == tsym), None)
         if not meta:
             scan_warning("graph_err", "EXECUTE missing metadata for symbol=%s", tsym)
+            _flow_done(err="Execute: symbol metadata missing")
             return {"error": "Execute: symbol metadata missing"}
         lot_size = max(1, int(meta.get("lot_size") or 1))
         try:
@@ -631,11 +812,13 @@ def build_mock_trading_graph(
             ltp = float(raw.get("last_price") or 0)
         except Exception as e:  # noqa: BLE001
             scan_warning("graph_err", "EXECUTE LTP fetch failed %s: %s", tsym, e)
+            _flow_done(err=f"LTP fetch failed: {e}")
             return {"error": f"LTP fetch failed: {e}"}
         if ltp <= 0:
             ltp = float(meta.get("ltp") or 0)
         if ltp <= 0:
             scan_warning("graph_err", "EXECUTE no LTP for %s", tsym)
+            _flow_done(err="No LTP for execution")
             return {"error": "No LTP for execution"}
         slip = mock_agent_slippage_points()
         entry = max(0.01, ltp - slip)
@@ -646,6 +829,7 @@ def build_mock_trading_graph(
         )
         if sltp_err:
             scan_warning("graph_err", "EXECUTE SL/TP %s", sltp_err)
+            _flow_done(err=sltp_err)
             return {"error": sltp_err}
         qty_units = lot_size  # mock: always 1 exchange lot (PnL uses units = lot_size)
         idx = (state.get("underlying") or "NIFTY").strip().upper()
@@ -671,6 +855,7 @@ def build_mock_trading_graph(
             )
         except ValueError as e:
             scan_warning("graph_err", "EXECUTE insert rejected: %s", e)
+            _flow_done(err=str(e))
             return {"error": str(e)}
         nb = snapshot_bar_count()
         if nb > 0:
@@ -698,6 +883,7 @@ def build_mock_trading_graph(
             target,
             qty_units,
         )
+        _flow_done(tid=tid)
         return {"trade_id": tid, "stop_loss": stop_loss, "target": target}
 
     def route_after_signal(state: TradingState) -> str:

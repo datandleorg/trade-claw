@@ -6,6 +6,7 @@ import json
 import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
@@ -33,6 +34,8 @@ from trade_claw.mock_market_signal import (
     nse_index_ltp_symbol,
     now_ist,
 )
+from trade_claw.env_trading_params import mock_llm_prompt_log_dir
+from trade_claw.mock_llm_flow_log import list_flow_dirs_in_date_range, read_json_if_exists
 from trade_claw.mock_trade_snapshot import snapshot_bar_count
 from trade_claw.plotly_ohlc import (
     add_candlestick_trace,
@@ -1479,8 +1482,106 @@ def render_mock_engine(kite):
             )
             st.plotly_chart(fig, use_container_width=True, key="mock_eng_cum")
 
-    tab_live, tab_an = st.tabs(["Live dashboard", "Analytics"])
+    def _render_llm_trace_tab() -> None:
+        root = mock_llm_prompt_log_dir()
+        if not root:
+            st.info(
+                "Set **`MOCK_LLM_PROMPT_LOG_DIR`** in the environment (Streamlit + Celery worker) to record and browse "
+                "unified **flow_*** runs (deterministic → vision → candidates → strike → outcome)."
+            )
+            return
+        st.caption(
+            "Folder names use **session date** `YYYY-MM-DD` as written by the worker (IST session calendar). "
+            "Pick an inclusive date range, then open a **flow_** run below."
+        )
+        c0, c1 = st.columns(2)
+        with c0:
+            d0 = st.date_input("Session date from", value=date.today() - timedelta(days=7), key="llm_trace_d0")
+        with c1:
+            d1 = st.date_input("Session date to", value=date.today(), key="llm_trace_d1")
+        if d0 > d1:
+            st.warning("Start date must be on or before end date.")
+            return
+        flows = list_flow_dirs_in_date_range(Path(root), d0, d1)
+        if not flows:
+            st.info("No **`flow_*`** directories in this range under the log root.")
+            return
+
+        def _label(i: int) -> str:
+            p = flows[i]
+            return f"{p.parent.parent.name} / {p.parent.name} / {p.name}"
+
+        pick = st.selectbox("Flow run", range(len(flows)), format_func=_label, key="llm_trace_pick")
+        fp = flows[int(pick)]
+
+        det = read_json_if_exists(fp / "deterministic.json")
+        if det is not None:
+            with st.expander("1. Deterministic signal", expanded=True):
+                st.json(det)
+
+        v_chart = fp / "vision" / "chart.png"
+        v_out = fp / "vision" / "breakout_output.json"
+        v_err = fp / "vision" / "llm_error.json"
+        v_sys = fp / "vision" / "system.txt"
+        v_hum = fp / "vision" / "human.txt"
+        if v_chart.is_file() or v_out.is_file() or v_err.is_file() or v_sys.is_file():
+            with st.expander("2. Vision validation", expanded=bool(v_chart.is_file())):
+                if v_chart.is_file():
+                    st.image(str(v_chart), caption="vision/chart.png")
+                if v_sys.is_file():
+                    st.text(v_sys.read_text(encoding="utf-8", errors="replace")[:12000])
+                if v_hum.is_file():
+                    st.markdown("**human.txt**")
+                    st.text(v_hum.read_text(encoding="utf-8", errors="replace")[:8000])
+                vo = read_json_if_exists(v_out)
+                if vo is not None:
+                    st.json(vo)
+                ve = read_json_if_exists(v_err)
+                if ve is not None:
+                    st.json(ve)
+        else:
+            st.caption("No **vision/** artifacts (chart attach off, PNG failed, or logging disabled for that step).")
+
+        cand_j = read_json_if_exists(fp / "candidates.json")
+        if cand_j is not None:
+            with st.expander("3. Candidates", expanded=False):
+                st.json(cand_j)
+
+        s_chart = fp / "strike" / "chart.png"
+        s_out = fp / "strike" / "llm_output.json"
+        s_err = fp / "strike" / "llm_error.json"
+        s_sys = fp / "strike" / "system.txt"
+        s_hum = fp / "strike" / "human.txt"
+        if s_chart.is_file() or s_out.is_file() or s_err.is_file() or s_sys.is_file():
+            with st.expander("4. Strike LLM", expanded=False):
+                if s_chart.is_file():
+                    st.image(str(s_chart), caption="strike/chart.png")
+                if s_sys.is_file():
+                    st.text(s_sys.read_text(encoding="utf-8", errors="replace")[:12000])
+                if s_hum.is_file():
+                    st.markdown("**human.txt**")
+                    st.text(s_hum.read_text(encoding="utf-8", errors="replace")[:12000])
+                so = read_json_if_exists(s_out)
+                if so is not None:
+                    st.json(so)
+                se = read_json_if_exists(s_err)
+                if se is not None:
+                    st.json(se)
+                for name in ("retry_system.txt", "retry_human.txt", "retry_note.txt"):
+                    rp = fp / "strike" / name
+                    if rp.is_file():
+                        st.markdown(f"**{name}**")
+                        st.text(rp.read_text(encoding="utf-8", errors="replace")[:8000])
+
+        oc = read_json_if_exists(fp / "outcome.json")
+        if oc is not None:
+            with st.expander("5. Outcome (execute)", expanded=True):
+                st.json(oc)
+
+    tab_live, tab_an, tab_llm = st.tabs(["Live dashboard", "Analytics", "LLM trace"])
     with tab_live:
         _hud()
     with tab_an:
         _render_mock_analytics(kite)
+    with tab_llm:
+        _render_llm_trace_tab()

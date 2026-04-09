@@ -9,26 +9,16 @@ from pathlib import Path
 from typing import Any
 
 
-def write_signal_llm_turn_log(
-    base_dir: Path,
+def write_llm_turn_snapshot(
+    run_dir: Path,
     *,
-    ist_now: datetime,
-    session_d: date,
-    underlying: str,
     system_text: str,
     human_text: str,
     chart_png: bytes | None,
     meta: dict[str, Any],
-) -> Path | None:
-    """
-    Create a directory under ``base_dir / session_date / HHMM /`` and write system text, human text,
-    optional ``chart.png``, and ``meta.json``. Returns the run directory, or ``None`` on failure.
-    """
+) -> bool:
+    """Write system/human/chart/meta under an existing or creatable ``run_dir`` (flow subfolders)."""
     try:
-        day = session_d.isoformat()
-        minute_key = ist_now.strftime("%H%M")
-        sub = f"{underlying}_{ist_now.strftime('%H%M%S')}_{uuid.uuid4().hex[:8]}"
-        run_dir = base_dir.expanduser().resolve() / day / minute_key / sub
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "system.txt").write_text(system_text, encoding="utf-8")
         (run_dir / "human.txt").write_text(human_text, encoding="utf-8")
@@ -58,9 +48,60 @@ def write_signal_llm_turn_log(
             json.dumps(human_parts, indent=2),
             encoding="utf-8",
         )
+        return True
+    except OSError:
+        return False
+
+
+def write_signal_llm_turn_log(
+    base_dir: Path,
+    *,
+    ist_now: datetime,
+    session_d: date,
+    underlying: str,
+    system_text: str,
+    human_text: str,
+    chart_png: bytes | None,
+    meta: dict[str, Any],
+) -> Path | None:
+    """
+    Create a directory under ``base_dir / session_date / HHMM /`` and write system text, human text,
+    optional ``chart.png``, and ``meta.json``. Returns the run directory, or ``None`` on failure.
+    """
+    try:
+        day = session_d.isoformat()
+        minute_key = ist_now.strftime("%H%M")
+        sub = f"{underlying}_{ist_now.strftime('%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        run_dir = base_dir.expanduser().resolve() / day / minute_key / sub
+        if not write_llm_turn_snapshot(
+            run_dir,
+            system_text=system_text,
+            human_text=human_text,
+            chart_png=chart_png,
+            meta=meta,
+        ):
+            return None
         return run_dir
     except OSError:
         return None
+
+
+def write_breakout_assessment_log(
+    run_dir: Path,
+    assessment: Any,
+    *,
+    invoke_path: str = "multimodal",
+) -> None:
+    """Write ``breakout_output.json`` (``LLMBreakoutAssessment`` + trace fields)."""
+    try:
+        dump = assessment.model_dump() if hasattr(assessment, "model_dump") else dict(assessment)
+        payload = {**dump, "_llm_invoke_path": invoke_path, "llm_flow": "breakout_validation"}
+        (run_dir / "breakout_output.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 def write_llm_structured_output_log(

@@ -54,6 +54,9 @@ def _graph_result_telemetry_payload(underlying_key: str, result: dict[str, Any])
         "llm_rationale": result.get("llm_rationale"),
         "signal_llm_rationale": result.get("signal_llm_rationale"),
         "signal_envelope_pct": result.get("signal_envelope_pct"),
+        "llm_flow_id": result.get("llm_flow_id"),
+        "llm_flow_dir": result.get("llm_flow_dir"),
+        "vision_validation_status": result.get("vision_validation_status"),
         "candidates": result.get("candidates"),
     }
 
