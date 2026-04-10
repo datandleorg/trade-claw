@@ -26,6 +26,11 @@ app.conf.update(
             "task": "trade_claw.scan_mock_market",
             "schedule": crontab(minute="*", hour="9-15", day_of_week="1-5"),
         },
+        "llm-banknifty-mock-scan": {
+            "task": "trade_claw.scan_llm_mock_banknifty",
+            "schedule": crontab(minute="*", hour="9-15", day_of_week="1-5"),
+            "options": {"queue": "llm_mock"},
+        },
     },
 )
 

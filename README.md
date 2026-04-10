@@ -13,6 +13,7 @@ Streamlit app for **Kite Connect** (Zerodha): view top 10 Nifty 50 stocks and hi
 - **F&O snapshots report**: browse saved JSON runs with **session date range**, **script (underlying)** filter, **pagination**, and per-run **tabs** (parameters, trade detail, charts). Sidebar **Navigate → F&O snapshots report**.
 - **F&O Agent (OpenAI)**: **Current calendar month** session date (not after today). **Deterministic** underlying signal (envelope or EMA), then an **OpenAI** ReAct loop with **only** Zerodha-style read tools **`search_instruments`**, **`get_historical_data`**, plus app-only **`submit_mock_trade_choice`** (no `place_order` / GTT / etc.). **No live orders**—mock P/L is computed in app code. Set **`OPENAI_API_KEY`** and optional **`OPENAI_MODEL`** (default `gpt-5.4-mini`) in `.env` or Streamlit secrets. With **`KITE_MCP_ENABLED=1`** (or **`KITE_MCP_STREAMABLE_URL`** / **`KITE_MCP_COMMAND`**), those read tools hit the **Zerodha Kite MCP server**; otherwise **KiteConnect** runs the same parameters in-process. See `.env.example` for **`KITE_MCP_*`**. Set **`KITE_MCP_TOOL_OUTPUT_FILE`** (e.g. `./logs/kite_mcp_tools.jsonl`) to append each MCP tool response as one JSON line. **Logs**: loggers `trade_claw.fo_openai_agent` and `trade_claw.kite_mcp_client`; set **`FO_AGENT_LOG_LEVEL=DEBUG`** for more detail. Sidebar **Navigate → F&O Agent**.
 - **Mock AI engine (autonomous)**: **Celery Beat** (IST, weekdays) triggers **`scan_mock_market`**, which runs **SL/target exits** then a **LangGraph** flow **per configured underlying** (default list = **`FO_UNDERLYING_OPTIONS`**, same as F&O Options; optional **`MOCK_ENGINE_UNDERLYINGS`** env subset) that has no open leg: spot **20-EMA ± bandwidth** breakout on the latest bar → long **CE** or **PE** only → top-five strikes → **OpenAI** structured pick → **mock** insert into SQLite (**`MOCK_TRADES_DB_PATH`**, WAL). **At most one OPEN row per underlying**; several underlyings can be open at once. **15:20 IST** square-off of every open row; before that, **target/stop** on option LTP each tick. The worker needs **Kite** access: log in once via Streamlit so **`.kite_session.json`** exists on the same host, or set **`KITE_ACCESS_TOKEN`**. Sidebar **Navigate → Mock AI engine**: **Live** tab (telemetry + live LTP/charts) and **Analytics** tab (multi-month stats from `mock_trades`, CSV export, optional snapshot replay via **`MOCK_ENGINE_SNAPSHOT_BARS`**). See **`.env.example`** for **`MOCK_AGENT_*`**. Stack: Redis + `uv run celery -A trade_claw.celery_app worker --loglevel=info` + `uv run celery -A trade_claw.celery_app beat --loglevel=info`. **Flow & architecture:** [docs/MOCK_ENGINE.md](docs/MOCK_ENGINE.md).
+- **LLM-only BANKNIFTY engine (autonomous)**: separate Celery periodic task **`scan_llm_mock_banknifty`** routed to queue **`llm_mock`** and consumed by a dedicated worker (`celery-worker-llm-mock`). The supervisor model (default **`gpt-5-mini`**) decides each minute whether to call a vision tool (default **Claude Haiku**) and then emits `HOLD` / `ENTER` / `EXIT`. Run artifacts are written under **`MOCK_LLM_PROMPT_LOG_DIR`** (`vision/chart.png`, `vision/analysis.json`, `supervisor/*.json`, `outcome.json`) and are visible in the **Mock AI engine → LLM engine analytics** tab.
 - **Stock page**: date range, interval, OHLC candlestick chart (Plotly), and summary metrics.
 
 ## Prerequisites
@@ -70,7 +71,8 @@ uv run streamlit run app.py
 
 This sample stack runs all app components together:
 - `streamlit` (UI on port `8501`)
-- `celery-worker`
+- `celery-worker` (default queue `celery`)
+- `celery-worker-llm-mock` (queue `llm_mock`)
 - `celery-beat`
 - `redis` (broker/result backend)
 
@@ -118,6 +120,8 @@ For deployment on a server such as a **DigitalOcean droplet** with your **own do
 | `trade_claw/views/index_etfs.py` | Index ETF dashboard |
 | `trade_claw/mock_engine_run.py` | Celery tick: SL/target exits, 15:20 square-off, LangGraph entry |
 | `trade_claw/mock_trading_graph.py` | LangGraph: signal → candidates → LLM → mock DB |
+| `trade_claw/mock_llm_banknifty_run.py` | Autonomous minute runner for LLM-only BANKNIFTY engine |
+| `trade_claw/mock_llm_banknifty_graph.py` | ReAct-style supervisor + optional vision tool + mock execution |
 | `trade_claw/mock_trade_store.py` | SQLite `mock_trades` (WAL) |
 | `trade_claw/kite_headless.py` | Kite client for workers (env + `.kite_session.json`) |
 | `trade_claw/views/mock_engine.py` | Streamlit HUD for mock engine |

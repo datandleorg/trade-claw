@@ -1613,10 +1613,81 @@ def render_mock_engine(kite):
             with st.expander("5. Outcome (execute)", expanded=True):
                 st.json(oc)
 
-    tab_live, tab_an, tab_llm = st.tabs(["Live dashboard", "Analytics", "LLM trace"])
+    def _render_llm_banknifty_runs_tab() -> None:
+        st.subheader("LLM BankNifty run analytics")
+        snap = mock_engine_telemetry.read_snapshot()
+        g = snap.get("last_graph") if isinstance(snap, dict) else {}
+        runs = g.get("runs") if isinstance(g, dict) else []
+        if isinstance(runs, list):
+            llm_runs = [r for r in runs if isinstance(r, dict) and str(r.get("engine_name") or "") == "llm_banknifty"]
+        else:
+            llm_runs = []
+        if llm_runs:
+            st.markdown("**Latest telemetry run**")
+            st.json(llm_runs[0])
+        else:
+            st.caption("No `llm_banknifty` telemetry run in latest snapshot yet.")
+
+        root = mock_llm_prompt_log_dir()
+        if not root:
+            st.info("Set `MOCK_LLM_PROMPT_LOG_DIR` to view per-run chart/analysis artifacts.")
+            return
+        d0c, d1c = st.columns(2)
+        with d0c:
+            d0 = st.date_input("From session date", value=date.today() - timedelta(days=7), key="llm_bn_d0")
+        with d1c:
+            d1 = st.date_input("To session date", value=date.today(), key="llm_bn_d1")
+        if d0 > d1:
+            st.warning("Start date must be on or before end date.")
+            return
+        flows = list_flow_dirs_in_date_range(Path(root), d0, d1)
+        if not flows:
+            st.info("No flow runs found in selected date range.")
+            return
+
+        def _f_label(i: int) -> str:
+            p = flows[i]
+            return f"{p.parent.parent.name}/{p.parent.name}/{p.name}"
+
+        pick = st.selectbox("Run folder", range(len(flows)), format_func=_f_label, key="llm_bn_pick")
+        fp = flows[int(pick)]
+        st.caption(f"Selected run: `{fp}`")
+
+        sup_int = read_json_if_exists(fp / "supervisor" / "intent.json")
+        sup_dec = read_json_if_exists(fp / "supervisor" / "decision.json")
+        sup_cands = read_json_if_exists(fp / "supervisor" / "candidates.json")
+        vis = read_json_if_exists(fp / "vision" / "analysis.json")
+        out = read_json_if_exists(fp / "outcome.json")
+        vis_chart = fp / "vision" / "chart.png"
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Supervisor intent**")
+            st.json(sup_int if sup_int is not None else {"info": "No intent.json"})
+            st.markdown("**Supervisor decision**")
+            st.json(sup_dec if sup_dec is not None else {"info": "No decision.json"})
+            st.markdown("**Outcome**")
+            st.json(out if out is not None else {"info": "No outcome.json"})
+        with c2:
+            st.markdown("**Vision chart sent to model**")
+            if vis_chart.is_file():
+                st.image(str(vis_chart), caption="vision/chart.png")
+            else:
+                st.caption("No chart image for this run.")
+            st.markdown("**Vision analysis output**")
+            st.json(vis if vis is not None else {"info": "No analysis.json"})
+        if sup_cands is not None:
+            st.markdown("**Candidates sent to supervisor**")
+            st.json(sup_cands)
+
+    tab_live, tab_an, tab_llm, tab_llm_bn = st.tabs(
+        ["Live dashboard", "Analytics", "LLM trace", "LLM engine analytics"]
+    )
     with tab_live:
         _hud()
     with tab_an:
         _render_mock_analytics(kite)
     with tab_llm:
         _render_llm_trace_tab()
+    with tab_llm_bn:
+        _render_llm_banknifty_runs_tab()

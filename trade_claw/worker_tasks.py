@@ -15,6 +15,7 @@ from trade_claw.event_pubsub import publish_task_event, redis_sync_client
 from langgraph.graph.state import CompiledStateGraph
 
 from trade_claw.joke_langgraph_agent import DEFAULT_JOKE_MODEL, build_joke_agent_graph
+from trade_claw.mock_llm_banknifty_run import run_llm_banknifty_scan_safe
 from trade_claw.mock_engine_run import run_scan_safe
 from trade_claw.task_runtime import pause_key, stop_key
 
@@ -209,6 +210,40 @@ def scan_mock_market() -> dict:
             "CELERY_TASK finished OK ist=%s graph_runs=%s new_trade_ids=%s",
             result.get("ist"),
             n_runs,
+            opened,
+        )
+    return result
+
+
+@app.task(name="trade_claw.scan_llm_mock_banknifty")
+def scan_llm_mock_banknifty() -> dict:
+    """Periodic autonomous LLM BANKNIFTY mock scan."""
+    scan_info("celery", "CELERY_TASK scan_llm_mock_banknifty started")
+    result = run_llm_banknifty_scan_safe()
+    if result.get("error"):
+        scan_error(
+            "graph_err",
+            "CELERY_TASK scan_llm_mock_banknifty finished ERROR ist=%s err=%s",
+            result.get("ist"),
+            result.get("error"),
+        )
+    elif result.get("skipped"):
+        scan_info(
+            "celery",
+            "CELERY_TASK scan_llm_mock_banknifty finished SKIP ist=%s skipped=%s",
+            result.get("ist"),
+            result.get("skipped"),
+        )
+    else:
+        g = result.get("graph") or {}
+        runs = g.get("runs") if isinstance(g, dict) else None
+        opened = 0
+        if isinstance(runs, list):
+            opened = sum(1 for r in runs if isinstance(r, dict) and r.get("trade_id"))
+        scan_info(
+            "celery",
+            "CELERY_TASK scan_llm_mock_banknifty finished OK ist=%s opened=%s",
+            result.get("ist"),
             opened,
         )
     return result

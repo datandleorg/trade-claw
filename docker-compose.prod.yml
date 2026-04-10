@@ -55,7 +55,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: uv run celery -A trade_claw.celery_app worker --loglevel=info
+    command: uv run celery -A trade_claw.celery_app worker -Q celery --loglevel=info
     restart: unless-stopped
     volumes:
       - trade_claw_app_data:/app/data
@@ -67,6 +67,25 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       KITE_SESSION_FILE: /app/data/.kite_session.json
       
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  celery-worker-llm-mock:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uv run celery -A trade_claw.celery_app worker -Q llm_mock --loglevel=info
+    restart: unless-stopped
+    volumes:
+      - trade_claw_app_data:/app/data
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      KITE_SESSION_FILE: /app/data/.kite_session.json
     depends_on:
       redis:
         condition: service_healthy
