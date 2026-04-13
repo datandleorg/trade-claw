@@ -134,6 +134,31 @@ def mock_engine_option_target_multiplier() -> float:
     return 1.0 + option_target_premium_fraction()
 
 
+def mock_engine_option_target_rupees_above_entry() -> float | None:
+    """
+    When ``MOCK_ENGINE_OPTION_TARGET_RUPEES`` is a positive number, the autonomous mock engine
+    stores take-profit option premium as **entry + this many rupees** (overrides percentage targets).
+    """
+    raw = (os.environ.get("MOCK_ENGINE_OPTION_TARGET_RUPEES") or "").strip()
+    if not raw:
+        return None
+    try:
+        v = float(raw)
+        if v <= 0:
+            return None
+        return float(min(v, 1_000_000.0))
+    except ValueError:
+        return None
+
+
+def mock_engine_option_target_price(entry: float) -> float:
+    """Resolved take-profit premium (₹) for mock engine after entry is known."""
+    ru = mock_engine_option_target_rupees_above_entry()
+    if ru is not None:
+        return round(float(entry) + float(ru), 2)
+    return round(float(entry) * mock_engine_option_target_multiplier(), 2)
+
+
 def mock_engine_stop_loss_floor_multiplier() -> float:
     """Alias for :func:`mock_engine_option_stop_multiplier`."""
     return mock_engine_option_stop_multiplier()

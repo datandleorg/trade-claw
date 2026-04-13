@@ -26,6 +26,8 @@ from trade_claw.env_trading_params import (
     mock_llm_sltp_stop_pct_bounds,
     mock_llm_sltp_target_pct_bounds,
     mock_llm_vision_model,
+    mock_engine_option_target_price,
+    mock_engine_option_target_rupees_above_entry,
     option_stop_premium_fraction,
     option_target_premium_fraction,
 )
@@ -52,7 +54,6 @@ from trade_claw.mock_market_signal import (
     mock_agent_envelope_pct_for_underlying,
     mock_agent_slippage_points,
     mock_engine_option_stop_multiplier,
-    mock_engine_option_target_multiplier,
     mock_engine_underlyings,
     top_five_option_instruments,
 )
@@ -67,19 +68,23 @@ def _resolve_entry_sltp(
 ) -> tuple[float, float, str | None]:
     """
     Validate LLM stop/target vs ``entry`` and env percent bands.
+    When ``MOCK_ENGINE_OPTION_TARGET_RUPEES`` is set, the stored target is always entry + that amount;
+    only the stop is checked against the stop band (LLM target is not persisted).
     Returns (stop_loss, target, error). On error, caller skips insert unless handled.
     """
+    fixed_tgt_rs = mock_engine_option_target_rupees_above_entry()
     tgt_lo_p, tgt_hi_p = mock_llm_sltp_target_pct_bounds()
     st_lo_p, st_hi_p = mock_llm_sltp_stop_pct_bounds()
     tgt_min = entry * (1 + tgt_lo_p)
     tgt_max = entry * (1 + tgt_hi_p)
     st_floor = entry * (1 - st_hi_p)
     st_ceil = entry * (1 - st_lo_p)
+    env_target = mock_engine_option_target_price(entry)
 
     def from_env() -> tuple[float, float]:
         return (
             round(entry * mock_engine_option_stop_multiplier(), 2),
-            round(entry * mock_engine_option_target_multiplier(), 2),
+            env_target,
         )
 
     if llm_stop is None or llm_target is None:
@@ -90,6 +95,29 @@ def _resolve_entry_sltp(
 
     stop = round(float(llm_stop), 2)
     target = round(float(llm_target), 2)
+
+    if fixed_tgt_rs is not None:
+        stop_valid = stop > 0 and stop < entry and st_floor <= stop <= st_ceil
+        if stop_valid:
+            return stop, env_target, None
+        if mock_llm_sltp_fallback_to_env():
+            scan_warning(
+                "graph_err",
+                "EXECUTE LLM SL/TP invalid entry=%.2f stop=%.2f (fixed target +₹%.2f; bands stop [%.2f,%.2f]) → env stop + fixed target",
+                entry,
+                stop,
+                fixed_tgt_rs,
+                st_floor,
+                st_ceil,
+            )
+            s, t = from_env()
+            return s, t, None
+        return (
+            0.0,
+            0.0,
+            f"Invalid LLM stop for entry ₹{entry:.2f}: need ₹{st_floor:.2f}≤stop≤₹{st_ceil:.2f} "
+            f"(or set MOCK_LLM_SLTP_FALLBACK=1). Target is fixed at ₹{env_target:.2f} (+₹{fixed_tgt_rs:,.0f} premium).",
+        )
 
     ok = (
         stop > 0
@@ -564,12 +592,33 @@ def build_mock_trading_graph(
         idx = (state.get("underlying") or "NIFTY").strip().upper()
         idx_label = FO_INDEX_UNDERLYING_LABELS.get(idx, idx)
         envelope_pct_u = mock_agent_envelope_pct_for_underlying(idx)
+        fixed_tgt_rs = mock_engine_option_target_rupees_above_entry()
         tgt_lo_p, tgt_hi_p = mock_llm_sltp_target_pct_bounds()
         st_lo_p, st_hi_p = mock_llm_sltp_stop_pct_bounds()
         sug_tgt = option_target_premium_fraction()
         sug_stp = option_stop_premium_fraction()
         risk_extra = mock_llm_risk_instruction()
         risk_block = f"\n\nAdditional risk guidance from operator:\n{risk_extra}" if risk_extra else ""
+        if fixed_tgt_rs is not None:
+            tgt_hint = (
+                f"Take-profit on option premium is **fixed by configuration** at **+₹{fixed_tgt_rs:,.0f}** above "
+                "synthetic entry; code stores that level regardless of your target field. "
+                "Still output **target** ≈ entry + that amount (must be > entry) for the schema. "
+            )
+            bounds_txt = (
+                f"Hard bounds (validated in code): **stop** between −{100 * st_hi_p:.1f}% and −{100 * st_lo_p:.1f}% "
+                "below entry (stop premium in that band). "
+            )
+        else:
+            tgt_hint = (
+                f"Suggested distance from entry: target about +{100 * sug_tgt:.1f}% above entry, "
+                f"stop about −{100 * sug_stp:.1f}% below entry (guidance only). "
+            )
+            bounds_txt = (
+                f"Hard bounds (validated in code): target between +{100 * tgt_lo_p:.1f}% and +{100 * tgt_hi_p:.1f}% "
+                f"above entry; stop between −{100 * st_hi_p:.1f}% and −{100 * st_lo_p:.1f}% below entry "
+                f"(i.e. stop premium in that band below entry). "
+            )
         base_sys = (
             "You choose one **NSE F&O option** contract (index or single-stock underlying) for a "
             "**long premium only** mock trade "
@@ -580,11 +629,8 @@ def build_mock_trading_graph(
             "Synthetic long entry will be approximately **LTP minus ~0.5–1.0 ₹ slippage** — "
             "your stop_loss must be **strictly below** that entry and target **strictly above** it: "
             "stop_loss < entry < target. "
-            f"Suggested distance from entry: target about +{100 * sug_tgt:.1f}% above entry, "
-            f"stop about −{100 * sug_stp:.1f}% below entry (guidance only). "
-            f"Hard bounds (validated in code): target between +{100 * tgt_lo_p:.1f}% and +{100 * tgt_hi_p:.1f}% "
-            f"above entry; stop between −{100 * st_hi_p:.1f}% and −{100 * st_lo_p:.1f}% below entry "
-            f"(i.e. stop premium in that band below entry). "
+            f"{tgt_hint}"
+            f"{bounds_txt}"
             "Use two decimal places mentally; output numeric rupee levels."
             f"{risk_block}"
         )
