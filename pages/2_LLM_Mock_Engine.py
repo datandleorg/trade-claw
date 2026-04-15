@@ -1,5 +1,4 @@
-"""Dedicated multipage route for LLM-only BANKNIFTY mock engine."""
-
+"""LLM-only BANKNIFTY mock engine — multipage route."""
 from dotenv import load_dotenv
 
 load_dotenv()

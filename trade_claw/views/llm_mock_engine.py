@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -11,6 +13,15 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from trade_claw import mock_trade_store
+from trade_claw.llm_mock_agent_memory import (
+    agent_chat_model_name,
+    agent_memory_path,
+    build_book_context_snapshot,
+    clear_messages,
+    invoke_agent_companion_reply,
+    load_messages,
+    save_messages,
+)
 from trade_claw.constants import ENVELOPE_EMA_PERIOD
 from trade_claw.env_trading_params import mock_engine_envelope_decimal_per_side, mock_llm_prompt_log_dir
 from trade_claw.market_data import candles_to_dataframe
@@ -265,6 +276,67 @@ def _find_flow_for_trade_id(trade_id: int, root: str | None) -> str | None:
     return None
 
 
+def _to_readable_text(payload: Any, *, preferred_keys: list[str] | None = None) -> str:
+    if payload is None:
+        return "No data."
+    if isinstance(payload, str):
+        return payload.strip() or "(empty)"
+    if isinstance(payload, list):
+        if not payload:
+            return "[]"
+        return "\n".join(
+            f"- {json.dumps(item, ensure_ascii=False, default=str)}" if not isinstance(item, (dict, list)) else f"- {item}"
+            for item in payload
+        )
+    if isinstance(payload, dict):
+        keys = list(payload.keys())
+        ordered: list[str] = []
+        if preferred_keys:
+            ordered.extend([k for k in preferred_keys if k in payload])
+        ordered.extend([k for k in keys if k not in ordered])
+        lines: list[str] = []
+        for k in ordered:
+            v = payload.get(k)
+            if isinstance(v, (dict, list)):
+                sval = json.dumps(v, ensure_ascii=False, indent=2, default=str)
+            else:
+                sval = str(v)
+            lines.append(f"{k}: {sval}")
+        return "\n".join(lines) if lines else "(empty object)"
+    return str(payload)
+
+
+def _summary_line(payload: Any, *, fields: list[str]) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    parts: list[str] = []
+    for f in fields:
+        v = payload.get(f)
+        if v is None or v == "":
+            continue
+        parts.append(f"{f}={v}")
+    return " | ".join(parts) if parts else None
+
+
+def _render_readable_block(
+    title: str,
+    payload: Any,
+    *,
+    empty_hint: str,
+    preferred_keys: list[str] | None = None,
+    summary_fields: list[str] | None = None,
+) -> None:
+    st.markdown(f"**{title}**")
+    if payload is None:
+        st.caption(empty_hint)
+        return
+    if summary_fields:
+        line = _summary_line(payload, fields=summary_fields)
+        if line:
+            st.caption(line)
+    st.code(_to_readable_text(payload, preferred_keys=preferred_keys), language="text")
+
+
 def _render_llm_observability() -> None:
     st.subheader("Run observability")
     root = mock_llm_prompt_log_dir()
@@ -302,24 +374,98 @@ def _render_llm_observability() -> None:
 
     lc, rc = st.columns(2)
     with lc:
-        st.markdown("**Supervisor intent**")
-        st.json(sup_int if sup_int is not None else {"info": "No intent.json"})
-        st.markdown("**Supervisor decision**")
-        st.json(sup_dec if sup_dec is not None else {"info": "No decision.json"})
-        st.markdown("**Outcome**")
-        st.json(out if out is not None else {"info": "No outcome.json"})
+        _render_readable_block(
+            "Supervisor intent",
+            sup_int,
+            empty_hint="No intent.json",
+            preferred_keys=["mode", "focus", "risk_plan", "use_vision"],
+            summary_fields=["mode", "use_vision"],
+        )
+        _render_readable_block(
+            "Supervisor decision",
+            sup_dec,
+            empty_hint="No decision.json",
+            preferred_keys=["action", "instrument", "stop_loss", "target", "rationale"],
+            summary_fields=["action", "instrument", "stop_loss", "target"],
+        )
+        _render_readable_block(
+            "Outcome",
+            out,
+            empty_hint="No outcome.json",
+            preferred_keys=["action", "trade_id", "closed_trade_id", "run_mode", "status", "reason"],
+            summary_fields=["action", "trade_id", "closed_trade_id", "status"],
+        )
     with rc:
-        st.markdown("**Chart sent to vision model**")
+        st.markdown("**Vision chart**")
         if vis_chart.is_file():
             st.image(str(vis_chart), caption="vision/chart.png")
         else:
             st.caption("No vision chart for this run.")
-        st.markdown("**Vision analysis output**")
-        st.json(vis_json if vis_json is not None else {"info": "No analysis.json"})
+        _render_readable_block(
+            "Vision output",
+            vis_json,
+            empty_hint="No analysis.json",
+            preferred_keys=["market_bias", "confidence", "reasoning", "suggested_leg"],
+            summary_fields=["market_bias", "confidence", "suggested_leg"],
+        )
 
-    if sup_cands is not None:
-        st.markdown("**Candidates passed to supervisor**")
-        st.json(sup_cands)
+    _render_readable_block(
+        "Candidates passed to supervisor",
+        sup_cands,
+        empty_hint="No candidates.json",
+        preferred_keys=["candidates"],
+    )
+
+
+def _render_agent_chat(kite) -> None:
+    st.subheader("Agent chat")
+    st.caption(
+        f"Messages are saved to **`{agent_memory_path()}`** and injected into the **minute supervisor** "
+        f"(`scan_llm_mock_banknifty`) as **agent memory**. Companion model: **{agent_chat_model_name()}**."
+    )
+
+    if st.session_state.get("nse_instruments") is None:
+        with st.spinner("Loading NSE instruments…"):
+            st.session_state.nse_instruments = kite.instruments("NSE")
+    if st.session_state.get("nfo_instruments") is None:
+        with st.spinner("Loading NFO instruments…"):
+            st.session_state.nfo_instruments = kite.instruments("NFO")
+
+    hist = load_messages()
+    for m in hist:
+        with st.chat_message(str(m.get("role") or "assistant")):
+            st.markdown(str(m.get("content") or ""))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Clear conversation", key="llm_mock_agent_mem_clear"):
+            clear_messages()
+            st.rerun()
+    with c2:
+        st.caption(f"{len(hist)} message(s) on disk")
+
+    if prompt := st.chat_input("Message the book / supervisor context…"):
+        ctx = build_book_context_snapshot(
+            kite=kite,
+            nse_instruments=st.session_state.get("nse_instruments"),
+            nfo_instruments=st.session_state.get("nfo_instruments"),
+            spot_fn=_banknifty_spot_quote,
+            opt_ltp_fn=_opt_ltp,
+        )
+        prior = load_messages()
+        user_text = prompt.strip()
+        prior.append({"role": "user", "content": user_text})
+        save_messages(prior)
+        with st.spinner("Companion is replying…"):
+            reply = invoke_agent_companion_reply(
+                user_message=user_text,
+                prior_chat_messages=prior[:-1],
+                context_block=ctx,
+            )
+        tail = load_messages()
+        tail.append({"role": "assistant", "content": reply})
+        save_messages(tail)
+        st.rerun()
 
 
 def render_llm_mock_engine(kite) -> None:
@@ -333,23 +479,30 @@ def render_llm_mock_engine(kite) -> None:
 
     @st.fragment(run_every=timedelta(seconds=10))
     def _auto_refresh_panel() -> None:
-        st.caption("Auto-refresh: every 10 seconds.")
-        if st.session_state.nse_instruments is None:
-            with st.spinner("Loading NSE instruments..."):
-                st.session_state.nse_instruments = kite.instruments("NSE")
-        if st.session_state.get("nfo_instruments") is None:
-            with st.spinner("Loading NFO instruments..."):
-                st.session_state.nfo_instruments = kite.instruments("NFO")
+            st.caption("Auto-refresh: every 10 seconds.")
+            if st.session_state.nse_instruments is None:
+                with st.spinner("Loading NSE instruments..."):
+                    st.session_state.nse_instruments = kite.instruments("NSE")
+            if st.session_state.get("nfo_instruments") is None:
+                with st.spinner("Loading NFO instruments..."):
+                    st.session_state.nfo_instruments = kite.instruments("NFO")
 
-        _render_banknifty_live_chart(kite, st.session_state.nse_instruments)
+            _render_banknifty_live_chart(kite, st.session_state.nse_instruments)
 
-        open_rows = [r for r in mock_trade_store.list_open_trades() if (r.index_underlying or "").upper() == _UNDERLYING]
-        st.subheader("Live quotes")
-        q1, q2 = st.columns(2)
-        with q1:
+            open_rows = [
+                r for r in mock_trade_store.list_open_trades() if (r.index_underlying or "").upper() == _UNDERLYING
+            ]
+            st.subheader("Live strip")
             bn_spot = _banknifty_spot_quote(kite)
-            st.metric("BANKNIFTY spot", f"₹{bn_spot:,.2f}" if bn_spot is not None else "—")
-        with q2:
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.metric("BANKNIFTY spot", f"₹{bn_spot:,.2f}" if bn_spot is not None else "—")
+            with m2:
+                st.metric("Open positions", len(open_rows))
+            with m3:
+                st.metric("Refresh cadence", "10s")
+
+            st.markdown("**Mock trade book**")
             if not open_rows:
                 st.caption("No open BANKNIFTY option quotes.")
             else:
@@ -360,57 +513,61 @@ def render_llm_mock_engine(kite) -> None:
                         {
                             "trade_id": r.trade_id,
                             "instrument": r.instrument or "—",
+                            "qty": r.quantity,
                             "option_ltp": f"₹{ltp:,.2f}" if ltp is not None else "—",
+                            "entry_price": r.entry_price,
                         }
                     )
                 st.dataframe(q_rows, use_container_width=True, hide_index=True)
 
-        st.subheader("Open BANKNIFTY mock positions")
-        if not open_rows:
-            st.caption("No open BANKNIFTY trades.")
-        else:
-            root = mock_llm_prompt_log_dir()
-            table_rows = []
-            for r in open_rows:
-                ltp = _opt_ltp(kite, r.instrument)
-                ep = float(r.entry_price or 0.0)
-                qty = int(r.quantity or 0)
-                unreal = ((ltp - ep) * qty) if (ltp is not None and ep > 0 and qty > 0) else None
-                unreal_pct = ((ltp - ep) * 100.0 / ep) if (ltp is not None and ep > 0) else None
-                flow_label = _find_flow_for_trade_id(r.trade_id, root)
-                table_rows.append(
-                    {
-                        "trade_id": r.trade_id,
-                        "instrument": r.instrument,
-                        "entry_time": r.entry_time,
-                        "entry_minute_ist": _entry_time_ist_label(r.entry_time),
-                        "entry_price": r.entry_price,
-                        "ltp": ltp,
-                        "unrealised_pnl": round(unreal, 2) if unreal is not None else None,
-                        "unrealised_pct": round(unreal_pct, 2) if unreal_pct is not None else None,
-                        "stop_loss": r.stop_loss,
-                        "target": r.target,
-                        "quantity": r.quantity,
-                        "status": r.status,
-                        "run_folder": flow_label or "not_found",
-                    }
-                )
-            st.dataframe(table_rows, use_container_width=True, hide_index=True)
-            for r in open_rows:
-                with st.expander(f"Detailed rationale · trade {r.trade_id}", expanded=False):
-                    st.markdown(f"**Trade time (IST):** `{_entry_time_ist_label(r.entry_time)}`")
-                    st.markdown(
-                        f"**Run folder:** `{_find_flow_for_trade_id(r.trade_id, root) or 'Not found in last 30 days'}`"
+            st.subheader("Open BANKNIFTY mock positions")
+            if not open_rows:
+                st.caption("No open BANKNIFTY trades.")
+            else:
+                root = mock_llm_prompt_log_dir()
+                table_rows = []
+                for r in open_rows:
+                    ltp = _opt_ltp(kite, r.instrument)
+                    ep = float(r.entry_price or 0.0)
+                    qty = int(r.quantity or 0)
+                    unreal = ((ltp - ep) * qty) if (ltp is not None and ep > 0 and qty > 0) else None
+                    unreal_pct = ((ltp - ep) * 100.0 / ep) if (ltp is not None and ep > 0) else None
+                    flow_label = _find_flow_for_trade_id(r.trade_id, root)
+                    table_rows.append(
+                        {
+                            "trade_id": r.trade_id,
+                            "instrument": r.instrument,
+                            "entry_time": r.entry_time,
+                            "entry_minute_ist": _entry_time_ist_label(r.entry_time),
+                            "entry_price": r.entry_price,
+                            "ltp": ltp,
+                            "unrealised_pnl": round(unreal, 2) if unreal is not None else None,
+                            "unrealised_pct": round(unreal_pct, 2) if unreal_pct is not None else None,
+                            "stop_loss": r.stop_loss,
+                            "target": r.target,
+                            "quantity": r.quantity,
+                            "status": r.status,
+                            "run_folder": flow_label or "not_found",
+                        }
                     )
-                    st.markdown("**Detailed rationale**")
-                    st.info((r.llm_rationale or "No rationale saved on trade row.").strip())
-            st.markdown("**Open trade option charts**")
-            for r in open_rows:
-                if r.instrument:
-                    _render_open_trade_option_chart(kite, st.session_state.nfo_instruments, r)
+                st.dataframe(table_rows, use_container_width=True, hide_index=True)
+                for r in open_rows:
+                    with st.expander(f"Detailed rationale · trade {r.trade_id}", expanded=False):
+                        st.markdown(f"**Trade time (IST):** `{_entry_time_ist_label(r.entry_time)}`")
+                        st.markdown(
+                            f"**Run folder:** `{_find_flow_for_trade_id(r.trade_id, root) or 'Not found in last 30 days'}`"
+                        )
+                        st.markdown("**Detailed rationale**")
+                        st.info((r.llm_rationale or "No rationale saved on trade row.").strip())
+                st.markdown("**Open trade option charts**")
+                for r in open_rows:
+                    if r.instrument:
+                        _render_open_trade_option_chart(kite, st.session_state.nfo_instruments, r)
 
     _auto_refresh_panel()
-    _render_llm_observability()
+
+    with st.expander("Run observability", expanded=False):
+        _render_llm_observability()
 
     st.subheader("BANKNIFTY positions (open + closed)")
     all_rows = [
@@ -450,3 +607,6 @@ def render_llm_mock_engine(kite) -> None:
             use_container_width=True,
             hide_index=True,
         )
+
+    st.divider()
+    _render_agent_chat(kite)

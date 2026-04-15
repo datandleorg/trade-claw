@@ -18,9 +18,10 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from trade_claw.constants import FO_INDEX_UNDERLYING_LABELS
+from trade_claw.llm_mock_agent_memory import format_transcript_for_worker
 from trade_claw.env_trading_params import (
     mock_engine_option_stop_multiplier,
-    mock_engine_option_target_multiplier,
+    mock_engine_option_target_price,
     mock_llm_prompt_log_dir,
 )
 from trade_claw.fo_support import _to_date
@@ -92,6 +93,45 @@ def _engine_enabled() -> bool:
     return (os.environ.get("LLM_MOCK_ENGINE_ENABLED") or "1").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _llm_mock_profit_exit_hint_inr() -> float:
+    """If estimated close P/L reaches this (₹), prompts tell the supervisor to favour EXIT."""
+    raw = (os.environ.get("LLM_MOCK_PROFIT_EXIT_HINT_INR") or "3000").strip()
+    try:
+        return float(max(0.0, min(50_000_000.0, float(raw))))
+    except ValueError:
+        return 3000.0
+
+
+def _banknifty_open_position_context(
+    kite: KiteConnect,
+    open_trade: mock_trade_store.MockTradeRow | None,
+) -> dict[str, Any] | None:
+    if open_trade is None or not (open_trade.instrument or "").strip():
+        return None
+    sym = str(open_trade.instrument).strip()
+    try:
+        row = kite.ltp([f"NFO:{sym}"]).get(f"NFO:{sym}") or {}
+        v = row.get("last_price")
+        opt_ltp = float(v) if v is not None else None
+    except Exception:  # noqa: BLE001
+        return {"instrument": sym, "option_ltp": None, "estimated_close_pnl_inr": None, "error": "ltp_failed"}
+    if opt_ltp is None or opt_ltp <= 0 or open_trade.entry_price is None:
+        return {"instrument": sym, "option_ltp": opt_ltp, "estimated_close_pnl_inr": None}
+    qty = max(1, int(open_trade.quantity or 1))
+    slip = mock_agent_slippage_points()
+    exit_est = max(0.01, opt_ltp - slip)
+    pnl = (exit_est - float(open_trade.entry_price)) * qty
+    return {
+        "instrument": sym,
+        "option_ltp": round(opt_ltp, 2),
+        "quantity": qty,
+        "entry_price": float(open_trade.entry_price),
+        "estimated_close_pnl_inr": round(pnl, 2),
+        "stored_stop_premium": open_trade.stop_loss,
+        "stored_target_premium": open_trade.target,
+    }
+
+
 def _build_flow_dir(session_d: date) -> tuple[str | None, Path | None]:
     root = mock_llm_prompt_log_dir()
     if not root:
@@ -110,7 +150,12 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         pass
 
 
-def _invoke_supervisor_intent(ctx: BankNiftyContext, *, open_trade: mock_trade_store.MockTradeRow | None) -> SupervisorIntent:
+def _invoke_supervisor_intent(
+    ctx: BankNiftyContext,
+    *,
+    open_trade: mock_trade_store.MockTradeRow | None,
+    position_ctx: dict[str, Any] | None = None,
+) -> SupervisorIntent:
     llm = ChatOpenAI(api_key=_openai_key(), model=_supervisor_model(), temperature=0.2).with_structured_output(SupervisorIntent)
     mode = "MANAGE" if open_trade else "SEARCH"
     otxt = (
@@ -118,14 +163,42 @@ def _invoke_supervisor_intent(ctx: BankNiftyContext, *, open_trade: mock_trade_s
         if open_trade
         else "No open trade for BANKNIFTY."
     )
+    hint = _llm_mock_profit_exit_hint_inr()
+    policy = (
+        f"Operator policy: **conservative** risk — modest targets, avoid greedy holds. "
+        f"If an open position’s estimated close P/L is around **₹{hint:,.0f}** or more, MANAGE mode should bias toward **locking gains** (exit readiness) rather than stretching for home runs. "
+        "If tape may be turning **against** the open leg’s path to its stored target (even subtly), bias toward **exit readiness**, not hero holds."
+    )
+    mem_tail = (format_transcript_for_worker() or "").strip()
+    mem_block = (
+        "\n\n--- Persistent operator/agent chat (tail; influence HOLD/ENTER/EXIT when relevant) ---\n"
+        f"{mem_tail}\n--- End chat memory ---\n"
+        if mem_tail
+        else ""
+    )
+    ctx_line = ""
+    if position_ctx and position_ctx.get("estimated_close_pnl_inr") is not None:
+        ctx_line = f"\nLive position context (JSON): {json.dumps(position_ctx, default=str)}"
     msg = HumanMessage(
         content=(
             f"Underlying={_UNDERLYING}. Mode={mode}. Session date={ctx.session_d}.\n"
             f"{otxt}\n"
+            f"{policy}{mem_block}{ctx_line}\n"
             "Decide intent for this minute. You may request vision tool when chart context is useful."
         )
     )
-    out: SupervisorIntent = llm.invoke([SystemMessage(content="You are a trading supervisor. Return concise intent."), msg])
+    out: SupervisorIntent = llm.invoke(
+        [
+            SystemMessage(
+                content=(
+                    "You are a trading supervisor for a mock intraday BANKNIFTY options book. "
+                    "Be **conservative**: protect open P/L; if conditions may be shifting **against** the trade’s path to its "
+                    "take-profit, favour managing toward exit rather than holding for the full target. Return concise intent."
+                )
+            ),
+            msg,
+        ]
+    )
     if ctx.flow_dir is not None:
         _write_json(
             ctx.flow_dir / "supervisor" / "intent.json",
@@ -241,6 +314,7 @@ def _invoke_supervisor_decision(
     vision: VisionAnalysis | None,
     spot: float,
     candidates: list[dict[str, Any]],
+    position_ctx: dict[str, Any] | None = None,
 ) -> SupervisorDecision:
     llm = ChatOpenAI(api_key=_openai_key(), model=_supervisor_model(), temperature=0.2).with_structured_output(SupervisorDecision)
     otxt = (
@@ -255,20 +329,53 @@ def _invoke_supervisor_decision(
         else None
     )
     vtxt = vision.model_dump() if vision else None
+    hint = _llm_mock_profit_exit_hint_inr()
     prompt = {
         "underlying": _UNDERLYING,
         "spot": spot,
         "open_trade": otxt,
+        "position_context": position_ctx,
         "vision_analysis": vtxt,
         "candidates": candidates[:5],
+        "profit_lock_hint_inr": hint,
         "rules": [
             "If no open trade: HOLD or ENTER.",
             "If open trade: HOLD or EXIT only.",
             "For ENTER choose one tradingsymbol from candidates.",
+            "Risk style: **conservative**. For ENTER, set stop_loss and target as option **premium** ₹ levels — "
+            "prefer **modest** target vs entry (realistic intraday take-profit), not stretched moonshots.",
+            "When `position_context.estimated_close_pnl_inr` is **≥ profit_lock_hint_inr** (or very close), **strongly prefer EXIT** "
+            "this minute if the book can close near current prices — crystallize gains unless vision shows **very** strong "
+            "continuation with clear room and you accept giveback risk. If unsure, EXIT.",
+            "Counter-trend / giveback rule (MANAGE): infer the open leg from `open_trade.instrument` (CE vs PE). "
+            "Long **CE** needs underlying strength toward the stored **target** premium; long **PE** needs weakness. "
+            "If `vision_analysis` or spot context shows **even a slight** shift **opposite** to that (e.g. CE: softening "
+            "bullish bias, creeping BEARISH/NEUTRAL, loss of momentum toward target; PE: the mirror), **prefer EXIT** to "
+            "take profits — do **not** hold for the full stored target when the tape argues against you. A small adverse "
+            "hint is enough when you already have green P/L; if P/L is flat or small green and the turn is credible, EXIT.",
+            "If `agent_memory_transcript` is non-empty, it is the **persisted operator ↔ companion chat** — treat it as "
+            "**live human steer** (intent, risk, exit bias). Integrate with vision and rules; if it conflicts with holding "
+            "for the mechanical target, **follow the operator thread**.",
         ],
     }
+    mem_full = (format_transcript_for_worker() or "").strip()
+    prompt["agent_memory_transcript"] = mem_full if mem_full else None
+    sys = (
+        "You are the intraday supervisor for a **mock** BANKNIFTY **long premium** book (long CE or long PE only).\n"
+        "**Conservative mandate:** bank realistic gains; avoid squeezing every rupee out of a move.\n"
+        "At **ENTER**, keep target/stop modest vs entry.\n"
+        "With an **open** position: (1) If estimated close P/L in `position_context` reaches or nears `profit_lock_hint_inr`, "
+        "strongly favour **EXIT** to lock gains unless continuation is overwhelmingly clear. "
+        "(2) **Trend vs target:** the stored `target` premium is only a guide — if vision/spot shows **even a slight** move "
+        "or bias **against** the direction that would carry the option toward that target (downward pressure vs a long CE’s "
+        "path; upward pressure vs a long PE’s path; fading momentum; conflicting bias vs the open leg), **take profits with "
+        "EXIT** rather than holding for the trigger. Prefer leaving money on the table over riding a reversal.\n"
+        "When the JSON payload includes non-null `agent_memory_transcript`, treat it as **authoritative persisted human "
+        "and companion context** — adjust focus, risk, and HOLD/ENTER/EXIT accordingly; it overrides generic stretch-for-target behaviour.\n"
+        "Return exactly one action: HOLD, ENTER, or EXIT, obeying the JSON rules."
+    )
     out: SupervisorDecision = llm.invoke(
-        [SystemMessage(content="You are a ReAct-like trading supervisor; return one action."), HumanMessage(content=json.dumps(prompt, default=str))]
+        [SystemMessage(content=sys), HumanMessage(content=json.dumps(prompt, default=str))]
     )
     if ctx.flow_dir is not None:
         _write_json(ctx.flow_dir / "supervisor" / "decision.json", out.model_dump())
@@ -280,7 +387,7 @@ def _entry_sltp(entry: float, stop_loss: float | None, target: float | None) -> 
     tg = float(target) if target is not None else 0.0
     if st > 0 and st < entry and tg > entry:
         return round(st, 2), round(tg, 2)
-    return round(entry * mock_engine_option_stop_multiplier(), 2), round(entry * mock_engine_option_target_multiplier(), 2)
+    return round(entry * mock_engine_option_stop_multiplier(), 2), mock_engine_option_target_price(entry)
 
 
 def invoke_llm_banknifty_graph(
@@ -309,7 +416,8 @@ def invoke_llm_banknifty_graph(
         "engine_name": "llm_banknifty",
     }
     open_trade = next((t for t in mock_trade_store.list_open_trades() if (t.index_underlying or "").upper() == _UNDERLYING), None)
-    intent = _invoke_supervisor_intent(ctx, open_trade=open_trade)
+    position_ctx = _banknifty_open_position_context(kite, open_trade)
+    intent = _invoke_supervisor_intent(ctx, open_trade=open_trade, position_ctx=position_ctx)
     out["run_mode"] = intent.mode.lower()
     out["supervisor_focus"] = intent.focus
     out["tools_called"] = []
@@ -321,6 +429,7 @@ def invoke_llm_banknifty_graph(
         return out
     spot = float(df_u["close"].iloc[-1])
     out["spot"] = spot
+    out["position_context"] = position_ctx
 
     # Always run the vision model for technical analysis on each tick.
     vision: VisionAnalysis | None = None
@@ -346,6 +455,7 @@ def invoke_llm_banknifty_graph(
         vision=vision,
         spot=spot,
         candidates=candidates,
+        position_ctx=position_ctx,
     )
     out["decision"] = decision.action
     out["llm_rationale"] = decision.rationale

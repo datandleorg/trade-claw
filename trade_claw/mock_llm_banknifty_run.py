@@ -22,6 +22,7 @@ from trade_claw.mock_engine_run import (
     session_date_ist,
     should_force_square_off,
 )
+from trade_claw.llm_mock_agent_memory import agent_memory_stats
 from trade_claw.mock_llm_banknifty_graph import invoke_llm_banknifty_graph
 
 _UNDERLYING = "BANKNIFTY"
@@ -96,6 +97,7 @@ def run_llm_banknifty_scan() -> dict[str, Any]:
         result = {"underlying": _UNDERLYING, "error": str(e)}
 
     payload = _graph_result_telemetry_payload(_UNDERLYING, dict(result))
+    payload.update(agent_memory_stats())
     payload["engine_name"] = "llm_banknifty"
     payload["run_mode"] = result.get("run_mode")
     payload["decision"] = result.get("decision")

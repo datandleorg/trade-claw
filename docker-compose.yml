@@ -22,6 +22,8 @@ services:
       - "8501:8501"
     volumes:
       - trade_claw_app_data:/app/data
+      # Host `trade_claw/` overrides image COPY so git pull / editor changes apply without rebuild (restart container to reload).
+      - ./trade_claw:/app/trade_claw
     env_file:
       - .env
     environment:
@@ -46,41 +48,13 @@ services:
             - "node_modules"
             - "frontend/node_modules"
 
-  celery-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: uv run celery -A trade_claw.celery_app worker -Q celery --loglevel=info
-    volumes:
-      - trade_claw_app_data:/app/data
-    env_file:
-      - .env
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
-      KITE_SESSION_FILE: /app/data/.kite_session.json
-    depends_on:
-      redis:
-        condition: service_healthy
-    develop:
-      watch:
-        - path: .
-          target: /app
-          action: sync
-          ignore:
-            - "**/__pycache__"
-            - "**/*.pyc"
-            - ".env"
-            - "data/*"
-            - "node_modules"
-            - "frontend/node_modules"
-
   celery-beat:
     build:
       context: .
       dockerfile: Dockerfile
     command: uv run celery -A trade_claw.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
+    volumes:
+      - ./trade_claw:/app/trade_claw
     env_file:
       - .env
     environment:
@@ -110,6 +84,7 @@ services:
     command: uv run celery -A trade_claw.celery_app worker -Q llm_mock --loglevel=info
     volumes:
       - trade_claw_app_data:/app/data
+      - ./trade_claw:/app/trade_claw
     env_file:
       - .env
     environment:
@@ -132,18 +107,3 @@ services:
             - "data/*"
             - "node_modules"
             - "frontend/node_modules"
-
-  # Tunnel to Streamlit via host port — avoids Docker DNS "lookup streamlit ... server misbehaving"
-  # when the embedded resolver flakes. Requires streamlit publishing 8501 (see streamlit.ports).
-  ngrok:
-    image: ngrok/ngrok:latest
-    command: http --log=stdout --url=unfaked-nonexaggeratedly-daisey.ngrok-free.dev host.docker.internal:8501
-    environment:
-      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      streamlit:
-        condition: service_started
-    ports:
-      - "4040:4040"

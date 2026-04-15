@@ -4,17 +4,11 @@ Streamlit app for **Kite Connect** (Zerodha): view top 10 Nifty 50 stocks and hi
 
 ## What it does
 
-- **Login** with Kite (redirect or manual token). Session is saved so a browser refresh keeps you logged in. After login, the app opens on **F&O Options** by default (sidebar: **Intraday home** for the Nifty 50 top-10 flow).
-- **Dashboard**: list of 10 Nifty 50 stocks (RELIANCE, TCS, HDFCBANK, INFY, etc.). Click **View** to open a stock. **Reports (date range)** opens the reports page.
-- **Home (single day)**: intraday strategies and mock trades for selected stocks. **Reports (use these settings)** copies date, stocks, strategy, interval, and long/short filter into Reports.
-- **Reports**: pick **from/to dates**, **stocks**, **strategy**, **interval**, and **trade direction**; **Generate report** loads history, runs one session per calendar day per symbol, and shows **totals in cards**, **P/L by stock**, and a **paginated** trade table.
-- **Index ETFs (NSE)**: buy-only **Institutional floor** — daily **SMA 50 / SMA 200**, suggested **₹10k standard** vs **₹20k aggressive** when price is at/below the 200-day SMA; golden-cross context and charts per ETF. Sidebar **Navigate → Index ETFs**.
-- **F&O Options**: pick **one underlying** and **session date**. **Index options** on the dropdown: **NIFTY**, **BANKNIFTY**, **FINNIFTY**, **MIDCPNIFTY**, **NIFTYNXT50** (Nifty Next 50), plus **Nifty 50 stocks**. **Strike policy** (ATM default = nearest listed strike to spot, plus ITM/OTM steps) and optional **manual strike** override. **Always 1 lot**. Exits: **target**, **stop loss** (sliders; defaults from `.env` via **`trade_claw/env_trading_params.py`** — `MOCK_ENGINE_OPTION_*` first, then `FO_OPTION_*`), or **EOD**. **Net P/L** after ₹/lot costs. Changing any parameter **saves a JSON snapshot** under `data/fo_options_runs/` (`FO_OPTIONS_RUNS_DIR` to override). Sidebar **Navigate → F&O Options**.
-- **F&O snapshots report**: browse saved JSON runs with **session date range**, **script (underlying)** filter, **pagination**, and per-run **tabs** (parameters, trade detail, charts). Sidebar **Navigate → F&O snapshots report**.
-- **F&O Agent (OpenAI)**: **Current calendar month** session date (not after today). **Deterministic** underlying signal (envelope or EMA), then an **OpenAI** ReAct loop with **only** Zerodha-style read tools **`search_instruments`**, **`get_historical_data`**, plus app-only **`submit_mock_trade_choice`** (no `place_order` / GTT / etc.). **No live orders**—mock P/L is computed in app code. Set **`OPENAI_API_KEY`** and optional **`OPENAI_MODEL`** (default `gpt-5.4-mini`) in `.env` or Streamlit secrets. With **`KITE_MCP_ENABLED=1`** (or **`KITE_MCP_STREAMABLE_URL`** / **`KITE_MCP_COMMAND`**), those read tools hit the **Zerodha Kite MCP server**; otherwise **KiteConnect** runs the same parameters in-process. See `.env.example` for **`KITE_MCP_*`**. Set **`KITE_MCP_TOOL_OUTPUT_FILE`** (e.g. `./logs/kite_mcp_tools.jsonl`) to append each MCP tool response as one JSON line. **Logs**: loggers `trade_claw.fo_openai_agent` and `trade_claw.kite_mcp_client`; set **`FO_AGENT_LOG_LEVEL=DEBUG`** for more detail. Sidebar **Navigate → F&O Agent**.
-- **Mock AI engine (autonomous)**: **Celery Beat** (IST, weekdays) triggers **`scan_mock_market`**, which runs **SL/target exits** then a **LangGraph** flow **per configured underlying** (default list = **`FO_UNDERLYING_OPTIONS`**, same as F&O Options; optional **`MOCK_ENGINE_UNDERLYINGS`** env subset) that has no open leg: spot **20-EMA ± bandwidth** breakout on the latest bar → long **CE** or **PE** only → top-five strikes → **OpenAI** structured pick → **mock** insert into SQLite (**`MOCK_TRADES_DB_PATH`**, WAL). **At most one OPEN row per underlying**; several underlyings can be open at once. **15:20 IST** square-off of every open row; before that, **target/stop** on option LTP each tick. The worker needs **Kite** access: log in once via Streamlit so **`.kite_session.json`** exists on the same host, or set **`KITE_ACCESS_TOKEN`**. Sidebar **Navigate → Mock AI engine**: **Live** tab (telemetry + live LTP/charts) and **Analytics** tab (multi-month stats from `mock_trades`, CSV export, optional snapshot replay via **`MOCK_ENGINE_SNAPSHOT_BARS`**). See **`.env.example`** for **`MOCK_AGENT_*`**. Stack: Redis + `uv run celery -A trade_claw.celery_app worker --loglevel=info` + `uv run celery -A trade_claw.celery_app beat --loglevel=info`. **Flow & architecture:** [docs/MOCK_ENGINE.md](docs/MOCK_ENGINE.md).
-- **LLM-only BANKNIFTY engine (autonomous)**: separate Celery periodic task **`scan_llm_mock_banknifty`** routed to queue **`llm_mock`** and consumed by a dedicated worker (`celery-worker-llm-mock`). The supervisor model (default **`gpt-5-mini`**) decides each minute whether to call a vision tool (default **Claude Haiku**) and then emits `HOLD` / `ENTER` / `EXIT`. Run artifacts are written under **`MOCK_LLM_PROMPT_LOG_DIR`** (`vision/chart.png`, `vision/analysis.json`, `supervisor/*.json`, `outcome.json`) and are visible in the **Mock AI engine → LLM engine analytics** tab.
-- **Stock page**: date range, interval, OHLC candlestick chart (Plotly), and summary metrics.
+This UI is intentionally slim: **`app.py`** is a **home hub** after Kite login, with sidebar links to two product pages.
+
+- **Login**: Kite redirect or manual token; session persists (same **`ensure_kite_session`** / **`page_config`** behaviour as the rest of the project).
+- **F&O Options** (`pages/1_F_Options.py`): pick an **underlying** and **session date**, strike policy, mock exits (target / stop / EOD), and optional JSON run snapshots under `data/fo_options_runs/` (see **`.env.example`**).
+- **LLM Mock Engine** (`pages/2_LLM_Mock_Engine.py`): live BANKNIFTY mock book, run observability, and **Agent chat**. Chat is stored in **`LLM_MOCK_AGENT_MEMORY_PATH`** (default `data/llm_mock_agent_memory.json`); the **minute Celery supervisor** reads the same transcript each tick. Set **`OPENAI_API_KEY`**; optional **`LLM_MOCK_AGENT_CHAT_MODEL`**, **`LLM_MOCK_SUPERVISOR_MODEL`**, **`ANTHROPIC_API_KEY`** for vision. Other Streamlit routes and workers may still exist in the repo for local development; the sample **Docker Compose** stack below runs only what this deployment needs.
 
 ## Prerequisites
 
@@ -69,11 +63,10 @@ uv run streamlit run app.py
 
 ## Docker Compose (sample)
 
-This sample stack runs all app components together:
+This sample stack runs the slim deployment together:
 - `streamlit` (UI on port `8501`)
-- `celery-worker` (default queue `celery`)
-- `celery-worker-llm-mock` (queue `llm_mock`)
-- `celery-beat`
+- `celery-worker-llm-mock` (queue `llm_mock` — **`scan_llm_mock_banknifty`**)
+- `celery-beat` (IST schedule for that task only)
 - `redis` (broker/result backend)
 
 1. Build and start:
@@ -91,12 +84,6 @@ If you want to remove Redis data volumes/images used by the stack:
 docker compose down -v --rmi local
 ```
 
-To expose Streamlit publicly with the included `ngrok` service:
-- add `NGROK_AUTHTOKEN=...` in `.env`
-- run `docker compose up -d`
-- this stack uses your reserved domain: `https://joesph-nonalliterative-nelida.ngrok-free.dev`
-- optional ngrok inspector is available at `http://localhost:4040`
-
 ## Production (VPS + domain + TLS)
 
 For deployment on a server such as a **DigitalOcean droplet** with your **own domain**, **Nginx** reverse proxy, and **Certbot** (Let’s Encrypt), use **`docker-compose.prod.yml`** and follow **[deploy/README.md](deploy/README.md)**. Set **`DOMAINS`** (comma-separated) or **`DOMAIN`**, plus **`CERTBOT_EMAIL`** for the first certificate, in `.env`; see `.env.example`.
@@ -105,7 +92,7 @@ For deployment on a server such as a **DigitalOcean droplet** with your **own do
 
 | Path | Role |
 |------|------|
-| `app.py` | Streamlit entrypoint: auth, routing |
+| `app.py` | Streamlit entrypoint: Kite session + **home** with `st.page_link` to **F&O Options** and **LLM Mock Engine** |
 | `trade_claw/constants.py` | Symbols, intervals; `ENVELOPE_PCT` = 0.0030 mirrors default intraday envelope when `INTRADAY_ENVELOPE_DECIMAL` is unset |
 | `trade_claw/env_trading_params.py` | Single place for **`.env`** trading knobs: intraday envelope, F&O/mock envelope (`MOCK_AGENT_ENVELOPE_PCT`), option target/stop (`MOCK_ENGINE_OPTION_*` / `FO_OPTION_*`) |
 | `trade_claw/kite_session.py` | Credentials, session state, `.kite_session.json` |
