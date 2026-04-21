@@ -105,15 +105,15 @@ services:
 
   # Tunnel to Streamlit via host port — avoids Docker DNS "lookup streamlit ... server misbehaving"
   # when the embedded resolver flakes. Requires streamlit publishing 8501 (see streamlit.ports).
-  ngrok:
-    image: ngrok/ngrok:latest
-    command: http --log=stdout --url=unfaked-nonexaggeratedly-daisey.ngrok-free.dev host.docker.internal:8501
-    environment:
-      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      streamlit:
-        condition: service_started
-    ports:
-      - "4040:4040"
+  # ngrok:
+  #   image: ngrok/ngrok:latest
+  #   command: http --log=stdout host.docker.internal:8501
+  #   environment:
+  #     NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+  #   extra_hosts:
+  #     - "host.docker.internal:host-gateway"
+  #   depends_on:
+  #     streamlit:
+  #       condition: service_started
+  #   ports:
+  #     - "4040:4040"

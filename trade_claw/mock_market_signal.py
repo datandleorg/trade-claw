@@ -8,12 +8,18 @@ import random
 from datetime import date, datetime, time as dtime
 from zoneinfo import ZoneInfo
 
-from trade_claw.constants import ENVELOPE_EMA_PERIOD, FO_INDEX_UNDERLYING_KEYS, NIFTY50_SYMBOLS
+from trade_claw.constants import (
+    ENVELOPE_EMA_PERIOD,
+    MOCK_ENGINE_SCAN_EQUITY_SYMBOLS,
+    MOCK_ENGINE_SCAN_INDEX_KEYS,
+)
 from trade_claw.env_trading_params import (
     fo_options_default_envelope_bandwidth_pct,
     fo_options_default_option_stop_loss_pct_ui,
     fo_options_default_option_target_pct_ui,
     fno_envelope_decimal_per_side,
+    mock_engine_equity_envelope_decimal_per_side,
+    mock_engine_index_envelope_decimal_per_side,
     mock_engine_breakout_clear_pct,
     mock_engine_breakout_max_lower_wick_frac,
     mock_engine_breakout_max_upper_wick_frac,
@@ -44,6 +50,18 @@ def mock_agent_envelope_pct() -> float:
     Env ``MOCK_AGENT_ENVELOPE_PCT`` overrides; else product default for mock engine / agent envelope.
     """
     return fno_envelope_decimal_per_side()
+
+
+def mock_agent_envelope_pct_for_underlying(u: str) -> float:
+    """
+    Mock engine scan: bandwidth each side for ``u`` — index underlyings vs equities.
+    Index keys are those with an NSE index spot mapping (see :func:`underlying_index_tradingsymbol`);
+    others use the equity envelope. Unset per-kind env vars fall back to ``MOCK_AGENT_ENVELOPE_PCT``.
+    """
+    uu = (u or "").strip().upper()
+    if underlying_index_tradingsymbol(uu) is not None:
+        return mock_engine_index_envelope_decimal_per_side()
+    return mock_engine_equity_envelope_decimal_per_side()
 
 
 def fo_option_target_pct_runtime() -> float:
@@ -98,15 +116,15 @@ def session_date_ist(dt: datetime) -> date:
 
 
 def mock_engine_allowed_underlyings() -> frozenset[str]:
-    """Symbols the mock engine may trade: index keys + Nifty 50 equity symbols."""
-    return frozenset(FO_INDEX_UNDERLYING_KEYS) | frozenset(NIFTY50_SYMBOLS)
+    """Symbols the mock engine may trade: ``MOCK_ENGINE_SCAN_INDEX_KEYS`` + ``MOCK_ENGINE_SCAN_EQUITY_SYMBOLS``."""
+    return frozenset(MOCK_ENGINE_SCAN_INDEX_KEYS) | frozenset(MOCK_ENGINE_SCAN_EQUITY_SYMBOLS)
 
 
 def mock_engine_default_underlyings() -> list[str]:
-    """Default scan order: three indices first, then Nifty 50 (no duplicates)."""
+    """Default scan order: NIFTY, BANKNIFTY, then the fixed equity list (no duplicates)."""
     seen: set[str] = set()
     out: list[str] = []
-    for u in list(FO_INDEX_UNDERLYING_KEYS) + list(NIFTY50_SYMBOLS):
+    for u in list(MOCK_ENGINE_SCAN_INDEX_KEYS) + list(MOCK_ENGINE_SCAN_EQUITY_SYMBOLS):
         ux = u.upper().strip()
         if ux not in seen:
             seen.add(ux)
@@ -117,8 +135,9 @@ def mock_engine_default_underlyings() -> list[str]:
 def mock_engine_underlyings() -> list[str]:
     """
     Keys scanned each graph run (envelope on spot 1m), in order.
-    Env ``MOCK_ENGINE_UNDERLYINGS`` = comma-separated subset of index keys and/or Nifty 50 symbols.
-    Default = indices (``FO_INDEX_UNDERLYING_KEYS``) then all ``NIFTY50_SYMBOLS``.
+    Env ``MOCK_ENGINE_UNDERLYINGS`` = comma-separated subset of allowed symbols (see
+    ``mock_engine_allowed_underlyings``).
+    Default = NIFTY + BANKNIFTY + ``MOCK_ENGINE_SCAN_EQUITY_SYMBOLS`` in ``constants.py``.
     """
     allowed = mock_engine_allowed_underlyings()
     raw = (os.environ.get("MOCK_ENGINE_UNDERLYINGS") or "").strip()

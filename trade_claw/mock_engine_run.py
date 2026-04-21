@@ -9,6 +9,11 @@ from typing import Any
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from trade_claw.env_trading_params import (
+    mock_engine_equity_envelope_decimal_per_side,
+    mock_engine_index_envelope_decimal_per_side,
+    mock_engine_profit_exit_inr,
+)
 from trade_claw.kite_headless import get_kite_headless
 from trade_claw.mock_market_signal import (
     in_entry_window,
@@ -122,10 +127,14 @@ def _close_at_ltp(
         ev = (
             "exit_target"
             if reason == "target"
+            else "exit_profit_inr"
+            if reason == "profit_inr"
             else "exit_stop"
             if reason == "stop"
             else "exit_square"
             if "square" in reason
+            else "exit_manual"
+            if reason == "manual"
             else "trade_closed"
         )
         scan_info(
@@ -141,7 +150,15 @@ def _close_at_ltp(
 
 
 def process_stop_target_exits(kite) -> int:
-    """Close OPEN trades when option LTP hits LLM target (above) or stop (below)."""
+    """
+    Close OPEN trades when:
+
+    - estimated unrealised P/L ≥ ``MOCK_ENGINE_PROFIT_EXIT_INR`` (default ₹3000), **or**
+    - option LTP ≥ stored premium **target** (LLM/env),
+
+    whichever is satisfied first on the path; then stop-loss below entry.
+    """
+    profit_inr = mock_engine_profit_exit_inr()
     n = 0
     for row in mock_trade_store.list_open_trades():
         ltp = _ltp(kite, row.instrument or "")
@@ -150,7 +167,13 @@ def process_stop_target_exits(kite) -> int:
         entry = float(row.entry_price or 0)
         tgt = float(row.target or 0)
         stp = float(row.stop_loss or 0)
-        if tgt > entry and ltp >= tgt:
+        qty = int(row.quantity or 0)
+        unreal = (ltp - entry) * qty if entry > 0 and qty > 0 else None
+
+        if profit_inr > 0 and unreal is not None and unreal >= profit_inr:
+            if _close_at_ltp(kite, row, reason="profit_inr"):
+                n += 1
+        elif tgt > entry and ltp >= tgt:
             if _close_at_ltp(kite, row, reason="target"):
                 n += 1
         elif stp > 0 and stp < entry and ltp <= stp:
@@ -166,6 +189,27 @@ def force_square_off_all(kite) -> int:
         if _close_at_ltp(kite, row, reason="square_off_1520"):
             n += 1
     return n
+
+
+def manual_close_mock_trade(kite, trade_id: int) -> tuple[bool, str]:
+    """
+    Human intervention: close one OPEN mock leg at synthetic LTP (same model as worker exits:
+    last price minus ``MOCK_AGENT_SLIPPAGE_*`` sampled slippage).
+    """
+    row: mock_trade_store.MockTradeRow | None = None
+    tid = int(trade_id)
+    for r in mock_trade_store.list_open_trades():
+        if int(r.trade_id) == tid:
+            row = r
+            break
+    if row is None:
+        return False, f"No OPEN trade with trade_id={tid}."
+    if _close_at_ltp(kite, row, reason="manual"):
+        return True, f"Trade {tid} closed at LTP (minus slippage)."
+    lp = _ltp(kite, row.instrument or "")
+    if lp is None or lp <= 0:
+        return False, "Could not read option LTP from Kite (quote failed or zero)."
+    return False, "Close failed (trade may have just been closed)."
 
 
 def _open_trades_payload() -> list[dict[str, Any]]:
@@ -216,6 +260,8 @@ def run_scan() -> dict[str, Any]:
 
     def finalize(graph_state: dict[str, Any] | None = None) -> None:
         out["agent_envelope_pct"] = mock_agent_envelope_pct()
+        out["agent_envelope_pct_index"] = mock_engine_index_envelope_decimal_per_side()
+        out["agent_envelope_pct_equity"] = mock_engine_equity_envelope_decimal_per_side()
         out["agent_ema_period"] = ENVELOPE_EMA_PERIOD
         out["open_trades_detail"] = _open_trades_payload()
         if kite is not None:

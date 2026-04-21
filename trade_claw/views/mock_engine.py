@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import NamedTuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -14,6 +15,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from trade_claw import mock_engine_telemetry
+from trade_claw.mock_engine_run import manual_close_mock_trade
 from trade_claw import mock_trade_analytics as mtd_an
 from trade_claw import mock_trade_store
 from trade_claw.constants import (
@@ -22,16 +24,37 @@ from trade_claw.constants import (
     NFO_EXCHANGE,
     NSE_EXCHANGE,
 )
+from trade_claw.env_trading_params import (
+    mock_engine_equity_envelope_decimal_per_side,
+    mock_engine_index_envelope_decimal_per_side,
+)
 from trade_claw.market_data import candles_to_dataframe
 from trade_claw.mock_market_signal import (
     load_index_session_minute_df,
-    mock_agent_envelope_pct,
+    mock_agent_envelope_pct_for_underlying,
     mock_engine_underlyings,
     nse_index_ltp_symbol,
     now_ist,
 )
 from trade_claw.strategies import _envelope_series, add_ma_envelope_line_traces
 from trade_claw.task_runtime import MOCK_TRADES_DB_PATH
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _utc_naive_sql_to_ist_str(ts: str | None) -> str | None:
+    """DB `mock_trades` times are naive UTC strings; show Asia/Kolkata in the trade book."""
+    if ts is None:
+        return None
+    raw = str(ts).strip()
+    if not raw:
+        return None
+    head = raw[:19]
+    try:
+        dt_utc = datetime.strptime(head, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+    except ValueError:
+        return raw
+    return dt_utc.astimezone(_IST).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class _SpotAxis(NamedTuple):
@@ -492,7 +515,8 @@ def _render_mock_analytics() -> None:
     if not snap_rows.empty:
         with st.expander("Replay stored minute snapshots (entry/exit)", expanded=False):
             st.caption(
-                "Index spot envelope bands use **current** `MOCK_AGENT_ENVELOPE_PCT` (same as Live), "
+                "Index spot envelope bands use **current** per-underlying bandwidth "
+                "(`MOCK_ENGINE_INDEX_ENVELOPE_PCT` / `MOCK_ENGINE_EQUITY_ENVELOPE_PCT` or `MOCK_AGENT_ENVELOPE_PCT`), "
                 "not the value at trade time. Underlying series matches the trade’s **index** column when set."
             )
             choices = [int(x) for x in snap_rows["trade_id"].tolist()]
@@ -517,7 +541,7 @@ def _render_mock_analytics() -> None:
                     if ubars:
                         df_u = pd.DataFrame(ubars)
                         df_u["date"] = pd.to_datetime(df_u["date"])
-                        env_pct_snap = mock_agent_envelope_pct()
+                        env_pct_snap = mock_agent_envelope_pct_for_underlying(snap_idx)
                         fig_u, _dual_u = _mock_index_spot_figure(
                             df_u,
                             snap_idx_label,
@@ -573,10 +597,11 @@ def _render_mock_analytics() -> None:
 
 
 def render_mock_engine(kite):
-    st.title("Mock AI engine (indices + Nifty 50)")
+    st.title("Mock AI engine (NIFTY · BANKNIFTY · selected equities)")
     st.caption(
         "Celery Beat runs `scan_mock_market` **every minute** (IST weekdays, ~09:15–15:19 entries; 15:20 square-off). "
-        "Default underlyings: **3 indices + all Nifty 50 stocks** (override with `MOCK_ENGINE_UNDERLYINGS`). "
+        "Default scan: **NIFTY**, **BANKNIFTY**, then **MOCK_ENGINE_SCAN_EQUITY_SYMBOLS** in `constants.py` "
+        "(override with comma-separated **`MOCK_ENGINE_UNDERLYINGS`**). "
         "Live tab **auto-refreshes every minute**. **At most one OPEN mock trade per underlying.**"
     )
     st.markdown(f"| DB path | `{MOCK_TRADES_DB_PATH}` |")
@@ -610,7 +635,8 @@ def render_mock_engine(kite):
     nse = st.session_state.nse_instruments
     nfo = st.session_state.nfo_instruments
     session_d = _session_date_today_ist()
-    env_pct = mock_agent_envelope_pct()
+    idx_env_pct = mock_engine_index_envelope_decimal_per_side()
+    eq_env_pct = mock_engine_equity_envelope_decimal_per_side()
 
     @st.fragment(run_every=timedelta(minutes=1))
     def _hud():
@@ -710,11 +736,18 @@ def render_mock_engine(kite):
         with w3:
             st.metric("Scan skip / state", last_scan.get("skipped") or "ok")
         with w4:
-            st.metric(
-                "Envelope ±",
-                f"{100 * env_pct:.3f}%",
-                help="From MOCK_AGENT_ENVELOPE_PCT (trade_claw.env_trading_params.fno_envelope_decimal_per_side)",
-            )
+            if abs(idx_env_pct - eq_env_pct) < 1e-15:
+                st.metric(
+                    "Envelope ±",
+                    f"{100 * idx_env_pct:.3f}%",
+                    help="All scrips: MOCK_AGENT_ENVELOPE_PCT, or set MOCK_ENGINE_INDEX_ENVELOPE_PCT / MOCK_ENGINE_EQUITY_ENVELOPE_PCT per kind.",
+                )
+            else:
+                st.metric(
+                    "Envelope ±",
+                    f"idx {100 * idx_env_pct:.2f}% · eq {100 * eq_env_pct:.2f}%",
+                    help="Index: MOCK_ENGINE_INDEX_ENVELOPE_PCT; equity: MOCK_ENGINE_EQUITY_ENVELOPE_PCT; unset kinds fall back to MOCK_AGENT_ENVELOPE_PCT.",
+                )
 
         if not open_rows:
             st.info(
@@ -723,7 +756,7 @@ def render_mock_engine(kite):
 
         st.subheader("Scrips — two columns")
         st.caption(
-            f"EMA **{ENVELOPE_EMA_PERIOD}** ± **{100 * env_pct:.3f}%** envelope on spot (1m). "
+            f"EMA **{ENVELOPE_EMA_PERIOD}** envelope on spot (1m): **index** ±{100 * idx_env_pct:.3f}% · **equity** ±{100 * eq_env_pct:.3f}% (each side). "
             "Each cell: quote, spot chart, last worker/LLM telemetry, and any **open** position for that underlying."
         )
         pu_map = last_graph.get("per_underlying") if isinstance(last_graph, dict) else None
@@ -834,6 +867,7 @@ def render_mock_engine(kite):
                     else:
                         st.metric("Spot LTP", _fmt)
 
+                    env_pct = mock_agent_envelope_pct_for_underlying(u)
                     df_u, err_u = load_index_session_minute_df(kite, nse, session_d, u)
                     if df_u is not None and not df_u.empty and not err_u:
                         center, upper, lower = _envelope_series(
@@ -920,6 +954,34 @@ def render_mock_engine(kite):
             )
 
         st.subheader("Mock trade book")
+        if open_rows:
+            st.markdown("**Manual exit (OPEN legs)**")
+            st.caption(
+                "Uses **option LTP minus mock slippage** (same fill logic as automatic target/stop/square-off). "
+                "Requires a working Kite session and NFO quote for the instrument."
+            )
+            for r in open_rows:
+                uix = (r.index_underlying or "—").strip() or "—"
+                inst = r.instrument or "—"
+                em1, em2, em3 = st.columns([1, 4, 1])
+                with em1:
+                    st.write(f"`{r.trade_id}`")
+                with em2:
+                    st.caption(
+                        f"{uix} · `{inst}` · entry ₹{float(r.entry_price or 0):,.2f} · qty {int(r.quantity or 0)}"
+                    )
+                with em3:
+                    if st.button(
+                        "Exit",
+                        key=f"mock_manual_exit_{r.trade_id}",
+                        help="Close this OPEN mock leg at LTP (human intervention)",
+                    ):
+                        ok, msg = manual_close_mock_trade(kite, r.trade_id)
+                        if ok:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+                        st.rerun()
         rows = mock_trade_store.list_recent_trades(limit=100)
         if not rows:
             st.caption("No rows in `mock_trades` yet.")
@@ -932,19 +994,28 @@ def render_mock_engine(kite):
                     pnl_f = None
                 if pnl_f is not None and pnl_f != pnl_f:
                     pnl_f = None
+                ltp = _opt_ltp(kite, r.instrument)
+                unreal_f: float | None = None
+                if (r.status or "").strip().upper() == "OPEN":
+                    ep = float(r.entry_price or 0.0)
+                    qty = int(r.quantity or 0)
+                    if ltp is not None and ep > 0 and qty > 0:
+                        unreal_f = (ltp - ep) * qty
                 data.append(
                     {
                         "trade_id": r.trade_id,
-                        "entry_time": r.entry_time,
-                        "exit_time": r.exit_time,
+                        "entry_time": _utc_naive_sql_to_ist_str(r.entry_time),
+                        "exit_time": _utc_naive_sql_to_ist_str(r.exit_time),
                         "instrument": r.instrument,
                         "index": r.index_underlying,
                         "direction": r.direction,
                         "entry": r.entry_price,
+                        "LTP": ltp,
                         "stop": r.stop_loss,
                         "target": r.target,
                         "status": r.status,
                         "exit": r.exit_price,
+                        "Unreal ₹": unreal_f,
                         "PnL": pnl_f,
                         "qty": r.quantity,
                     }
@@ -964,10 +1035,19 @@ def render_mock_engine(kite):
                         out.append("")
                 return out
 
+            st.caption(
+                "**entry_time / exit_time** = **IST** (Asia/Kolkata), converted from UTC stored in the DB. "
+                "**LTP** = live option last price from Kite (when available). "
+                "**Unreal ₹** = (LTP − entry) × qty for **OPEN** rows. "
+                "**PnL** = realised on **CLOSED** rows."
+            )
             st.dataframe(
-                df_book.style.format({"PnL": "₹{:,.2f}"}, na_rep="—").apply(
-                    _pnl_color, subset=["PnL"]
-                ),
+                df_book.style.format(
+                    {"LTP": "₹{:,.2f}", "Unreal ₹": "₹{:+,.2f}", "PnL": "₹{:,.2f}"},
+                    na_rep="—",
+                )
+                .apply(_pnl_color, subset=["Unreal ₹"])
+                .apply(_pnl_color, subset=["PnL"]),
                 use_container_width=True,
                 hide_index=True,
             )

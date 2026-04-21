@@ -23,6 +23,28 @@ def fno_envelope_decimal_per_side() -> float:
     return float(_DEFAULT_MOCK_AGENT_ENVELOPE_DECIMAL)
 
 
+def mock_engine_index_envelope_decimal_per_side() -> float:
+    """
+    Mock engine only: envelope half-width for **index** underlyings (NIFTY, BANKNIFTY, MIDCPNIFTY, …).
+    ``MOCK_ENGINE_INDEX_ENVELOPE_PCT`` when set; else same as :func:`fno_envelope_decimal_per_side`.
+    """
+    raw = (os.environ.get("MOCK_ENGINE_INDEX_ENVELOPE_PCT") or "").strip()
+    if raw:
+        return float(raw)
+    return fno_envelope_decimal_per_side()
+
+
+def mock_engine_equity_envelope_decimal_per_side() -> float:
+    """
+    Mock engine only: envelope half-width for **equity** underlyings (cash symbols in the scan list).
+    ``MOCK_ENGINE_EQUITY_ENVELOPE_PCT`` when set; else same as :func:`fno_envelope_decimal_per_side`.
+    """
+    raw = (os.environ.get("MOCK_ENGINE_EQUITY_ENVELOPE_PCT") or "").strip()
+    if raw:
+        return float(raw)
+    return fno_envelope_decimal_per_side()
+
+
 def fo_options_default_envelope_bandwidth_pct() -> float:
     """F&O envelope slider default (% each side); clamped to UI min/max."""
     bw = round(100.0 * fno_envelope_decimal_per_side(), 6)
@@ -118,6 +140,20 @@ def mock_engine_option_target_multiplier() -> float:
 def mock_engine_stop_loss_floor_multiplier() -> float:
     """Alias for :func:`mock_engine_option_stop_multiplier`."""
     return mock_engine_option_stop_multiplier()
+
+
+def mock_engine_profit_exit_inr() -> float:
+    """
+    Mock engine: close OPEN long-premium trades when estimated unrealised P/L (₹) reaches this level,
+    **or** when option LTP hits the stored premium **target** — whichever happens first on the tape.
+    ``0`` disables the INR take-profit (premium target + stop only).
+    """
+    raw = (os.environ.get("MOCK_ENGINE_PROFIT_EXIT_INR") or "3000").strip()
+    try:
+        v = float(raw)
+        return float(max(0.0, min(50_000_000.0, v)))
+    except ValueError:
+        return 3000.0
 
 
 def mock_engine_breakout_clear_pct() -> float:

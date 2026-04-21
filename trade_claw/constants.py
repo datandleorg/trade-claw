@@ -19,6 +19,31 @@ FO_INDEX_UNDERLYING_LABELS = {
     "MIDCPNIFTY": "MIDCP NIFTY (Nifty Midcap Select)",
 }
 FO_DEFAULT_UNDERLYINGS = list(FO_INDEX_UNDERLYING_KEYS)
+
+# Celery `scan_mock_market` default universe: NIFTY + BANKNIFTY + named equities (override with `MOCK_ENGINE_UNDERLYINGS`).
+MOCK_ENGINE_SCAN_INDEX_KEYS = ["NIFTY", "BANKNIFTY"]
+MOCK_ENGINE_SCAN_EQUITY_SYMBOLS = [
+    "HDFCBANK",
+    "ICICIBANK",
+    "AXISBANK",
+    "KOTAKBANK",
+    "SBIN",
+    "RELIANCE",
+    "INFY",
+    "TCS",
+    "HCLTECH",
+    "WIPRO",
+    "TATAMOTORS",
+    "MARUTI",
+    "M&M",
+    "LT",
+    "JSWSTEEL",
+    "TATASTEEL",
+    "ITC",
+    "BHARTIARTL",
+    "ADANIENT",
+    "ADANIPORTS",
+]
 # Summary metrics: Target or Stop = realised; EOD = held to close
 FO_CLOSED_AT_REALISED = ("Target", "Stop")
 # F&O UI: envelope distance each side as % of EMA (upper = EMA×(1+pct), lower = EMA×(1−pct))
