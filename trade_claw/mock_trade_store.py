@@ -264,6 +264,15 @@ def close_trade(
         return cur.rowcount > 0
 
 
+def max_trade_id() -> int:
+    """Largest ``trade_id`` in ``mock_trades``, or 0 if empty."""
+    init_db()
+    with _lock, _connect() as conn:
+        row = conn.execute("SELECT MAX(trade_id) FROM mock_trades").fetchone()
+    v = row[0] if row else None
+    return int(v) if v is not None else 0
+
+
 def list_open_trades() -> list[MockTradeRow]:
     init_db()
     with _lock, _connect() as conn:

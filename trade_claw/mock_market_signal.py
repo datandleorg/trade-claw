@@ -401,14 +401,23 @@ def envelope_breakout_on_last_bar(
     return True, text, sig
 
 
-def load_index_session_minute_df(kite, nse_instruments: list, session_d: date, underlying_key: str):
-    """Today's (IST) session 09:15–15:30 minute bars for the index key (``NIFTY``, ``BANKNIFTY``, …)."""
+def load_index_session_interval_df(
+    kite, nse_instruments: list, session_d: date, underlying_key: str, interval: str
+):
+    """Today's (IST) session 09:15–15:30 bars for the index key (``minute``, ``3minute``, …)."""
     from_dt = datetime(session_d.year, session_d.month, session_d.day, 9, 15, 0)
     to_dt = datetime(session_d.year, session_d.month, session_d.day, 15, 30, 0)
     from_str = from_dt.strftime("%Y-%m-%d %H:%M:%S")
     to_str = to_dt.strftime("%Y-%m-%d %H:%M:%S")
     return fetch_underlying_intraday(
-        kite, underlying_key.upper().strip(), nse_instruments, from_str, to_str, "minute"
+        kite, underlying_key.upper().strip(), nse_instruments, from_str, to_str, interval
+    )
+
+
+def load_index_session_minute_df(kite, nse_instruments: list, session_d: date, underlying_key: str):
+    """Today's (IST) session 09:15–15:30 minute bars for the index key (``NIFTY``, ``BANKNIFTY``, …)."""
+    return load_index_session_interval_df(
+        kite, nse_instruments, session_d, underlying_key, "minute"
     )
 
 

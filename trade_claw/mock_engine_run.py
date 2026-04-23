@@ -25,6 +25,7 @@ from trade_claw.mock_market_signal import (
     session_date_ist,
     should_force_square_off,
 )
+from trade_claw.mock_index_vision_trend import resolve_index_trends_for_tick
 from trade_claw.mock_trading_graph import invoke_mock_graph
 from trade_claw.task_runtime import MOCK_TRADES_DB_PATH
 from trade_claw import mock_engine_telemetry
@@ -57,6 +58,7 @@ def _graph_result_telemetry_payload(underlying_key: str, result: dict[str, Any])
         "target": result.get("target"),
         "llm_rationale": result.get("llm_rationale"),
         "candidates": result.get("candidates"),
+        "llm_skip_trade": result.get("llm_skip_trade"),
     }
 
 
@@ -298,6 +300,17 @@ def run_scan() -> dict[str, Any]:
             out["nifty_ltp"] = None
             out["open_option_ltp"] = None
             out["open_options_ltps"] = []
+        _prev_snap = mock_engine_telemetry.read_snapshot()
+        _prev_last = (_prev_snap.get("last_scan") or {}) if _prev_snap else {}
+        for _vk in (
+            "index_trends_3m",
+            "index_vision_as_of_ist",
+            "index_vision_model",
+            "index_vision_disabled",
+            "index_vision_refreshed",
+        ):
+            if _vk not in out and _vk in _prev_last:
+                out[_vk] = _prev_last[_vk]
         mock_engine_telemetry.merge_and_save(last_scan=dict(out), graph_state=graph_state)
 
     try:
@@ -351,6 +364,10 @@ def run_scan() -> dict[str, Any]:
         finalize(None)
         return out
 
+    _vision_snap = mock_engine_telemetry.read_snapshot()
+    vpack = resolve_index_trends_for_tick(kite, nse, session_d, _vision_snap)
+    out.update(vpack)
+
     db_file = str(Path(MOCK_TRADES_DB_PATH).resolve())
     graph_runs: list[dict[str, Any]] = []
     try:
@@ -367,7 +384,11 @@ def run_scan() -> dict[str, Any]:
                         session_d=session_d,
                         nse_instruments=nse,
                         nfo_instruments=nfo,
-                        initial_state={"signal_underlying": u},
+                        initial_state={
+                            "signal_underlying": u,
+                            "index_trends_3m": out.get("index_trends_3m"),
+                            "index_vision_disabled": bool(out.get("index_vision_disabled")),
+                        },
                     )
                 except Exception as e:  # noqa: BLE001
                     scan_exception("graph_err", "graph_invoke_failed underlying=%s", u)

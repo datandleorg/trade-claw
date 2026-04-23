@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from collections import defaultdict
+from pathlib import Path
 from datetime import UTC, date, datetime, timedelta
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
@@ -13,6 +15,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
 
 from trade_claw import mock_engine_telemetry
 from trade_claw.mock_engine_run import manual_close_mock_trade
@@ -29,7 +32,12 @@ from trade_claw.env_trading_params import (
     mock_engine_index_envelope_decimal_per_side,
 )
 from trade_claw.market_data import candles_to_dataframe
+from trade_claw.mock_index_vision_trend import (
+    VISION_INDEX_KEYS,
+    build_index_vision_candlestick_figure,
+)
 from trade_claw.mock_market_signal import (
+    load_index_session_interval_df,
     load_index_session_minute_df,
     mock_agent_envelope_pct_for_underlying,
     mock_engine_underlyings,
@@ -40,6 +48,66 @@ from trade_claw.strategies import _envelope_series, add_ma_envelope_line_traces
 from trade_claw.task_runtime import MOCK_TRADES_DB_PATH
 
 _IST = ZoneInfo("Asia/Kolkata")
+_TREND_STATES = frozenset({"BULLISH", "BEARISH", "NEUTRAL"})
+
+
+def _vision_trend_snapshot(last_scan: dict) -> dict[str, str | None]:
+    out: dict[str, str | None] = {k: None for k in VISION_INDEX_KEYS}
+    raw = last_scan.get("index_trends_3m")
+    if not isinstance(raw, dict):
+        return out
+    for k in VISION_INDEX_KEYS:
+        block = raw.get(k)
+        if isinstance(block, dict):
+            t = block.get("trend")
+            if t in _TREND_STATES:
+                out[k] = str(t)
+    return out
+
+
+def _mock_bell_wav_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "static" / "mock_bell.wav"
+
+
+def _format_stored_vision_error(msg: str | None) -> str:
+    """
+    Telemetry keeps the last per-index vision error in SQLite. Older builds used Plotly+Kaleido
+    for PNGs; that error text is misleading after switching to matplotlib+mplfinance.
+    """
+    if not msg:
+        return ""
+    low = str(msg).lower()
+    if "kaleido" in low or "plotly_get_chrome" in low or "google chrome" in low:
+        return (
+            "This message was saved by an **older worker** that used Plotly static export (Kaleido/Chrome). "
+            "**Restart the Celery worker** so it runs the current code (matplotlib + mplfinance, no Chrome). "
+            "Ensure the worker env has `matplotlib` and `mplfinance` installed, then wait for the next vision cycle."
+        )
+    return str(msg).strip()
+
+
+def _play_mock_bell(*, html_key: str) -> None:
+    p = _mock_bell_wav_path()
+    if not p.is_file():
+        return
+    try:
+        b64 = base64.standard_b64encode(p.read_bytes()).decode("ascii")
+    except OSError:
+        return
+    components.html(
+        f"""
+        <audio id="{html_key}" preload="auto">
+          <source src="data:audio/wav;base64,{b64}" type="audio/wav" />
+        </audio>
+        <script>
+          (function() {{
+            var a = document.getElementById("{html_key}");
+            if (a) {{ a.volume = 1.0; a.play().catch(function(){{}}); }}
+          }})();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def _utc_naive_sql_to_ist_str(ts: str | None) -> str | None:
@@ -310,6 +378,8 @@ def _render_last_graph_run_panel(run: dict | None, *, key_prefix: str) -> None:
         )
     with g3:
         st.markdown(f"**Trade id** · {run.get('trade_id') or '—'}")
+        if run.get("llm_skip_trade"):
+            st.caption("LLM **declined** to open (proceed_with_trade=false)")
     sig_txt = run.get("signal_text")
     notes_txt = run.get("notes")
     if sig_txt:
@@ -336,10 +406,11 @@ def _render_last_graph_run_panel(run: dict | None, *, key_prefix: str) -> None:
     if cands:
         st.markdown("**Candidates sent to LLM**")
         st.dataframe(pd.DataFrame(cands), use_container_width=True, hide_index=True)
-    if run.get("llm_tradingsymbol"):
+    if run.get("llm_tradingsymbol") or run.get("llm_skip_trade"):
         st.markdown("**LLM decision (structured)**")
         st.json(
             {
+                "llm_skip_trade": run.get("llm_skip_trade"),
                 "tradingsymbol": run.get("llm_tradingsymbol"),
                 "stop_loss": run.get("stop_loss"),
                 "target": run.get("target"),
@@ -646,6 +717,40 @@ def render_mock_engine(kite):
         last_scan = snap.get("last_scan") or {}
         last_graph = snap.get("last_graph") or {}
 
+        sound_on = st.checkbox(
+            "Bell sounds (trend reversal / new trade)",
+            True,
+            key="mock_engine_sound_on",
+            help="Plays a short bell when NIFTY/BANKNIFTY vision trend changes or when a new mock trade_id appears. Browsers may require a prior click on the page.",
+        )
+        snap_now = _vision_trend_snapshot(last_scan)
+        snap_prev = st.session_state.get("mock_last_vision_trends")
+        if snap_prev is None:
+            st.session_state.mock_last_vision_trends = dict(snap_now)
+        else:
+            rev = False
+            for k in VISION_INDEX_KEYS:
+                a, b = snap_prev.get(k), snap_now.get(k)
+                if a in _TREND_STATES and b in _TREND_STATES and a != b:
+                    rev = True
+                    break
+            if rev and sound_on:
+                _seq = int(st.session_state.get("_mock_bell_seq", 0))
+                _play_mock_bell(html_key=f"mock_bell_rev_{_seq}")
+                st.session_state._mock_bell_seq = _seq + 1
+            st.session_state.mock_last_vision_trends = dict(snap_now)
+
+        mx = mock_trade_store.max_trade_id()
+        pm = st.session_state.get("mock_last_max_trade_id")
+        if pm is None:
+            st.session_state.mock_last_max_trade_id = mx
+        elif mx > int(pm):
+            if sound_on:
+                _seq = int(st.session_state.get("_mock_bell_seq", 0))
+                _play_mock_bell(html_key=f"mock_bell_tid_{_seq}")
+                st.session_state._mock_bell_seq = _seq + 1
+            st.session_state.mock_last_max_trade_id = mx
+
         open_rows = mock_trade_store.list_open_trades()
         und = mock_engine_underlyings()
         open_by_u: dict[str, list] = defaultdict(list)
@@ -753,6 +858,66 @@ def render_mock_engine(kite):
             st.info(
                 "No **OPEN** mock trades. The worker opens at most **one leg per underlying** when a breakout fires and that underlying is flat."
             )
+
+        st.subheader("Index vision trend (Claude Haiku 4.5 · 1m chart)")
+        st.caption(
+            "The worker builds a **1-minute** session candlestick chart for each index, sends it to **Claude Haiku 4.5** "
+            "(**MOCK_INDEX_VISION_MODEL**, default `claude-haiku-4-5-20251001`), and refreshes that call every **MOCK_INDEX_VISION_INTERVAL_MIN** minutes (default 3). "
+            "Telemetry field `index_trends_3m` is the stored snapshot name; data is **1m** candles. "
+            "**Vision rationale** is saved only when that worker step runs successfully (this page does not call Claude). "
+            "Use a running **Celery worker + Beat** with **ANTHROPIC_API_KEY** in the worker environment, then wait for a refresh or the throttle interval."
+        )
+        vis_as_of = last_scan.get("index_vision_as_of_ist")
+        vis_model = last_scan.get("index_vision_model") or "—"
+        vis_dis = last_scan.get("index_vision_disabled")
+        vis_ref = last_scan.get("index_vision_refreshed")
+        st.caption(
+            f"As-of: **{vis_as_of or '—'}** · model: `{vis_model}` · vision disabled: **{vis_dis}** · "
+            f"refreshed this worker tick: **{vis_ref}**"
+        )
+        trends = last_scan.get("index_trends_3m")
+        ic1, ic2 = st.columns(2)
+        for ix, key in enumerate(VISION_INDEX_KEYS):
+            with ic1 if ix == 0 else ic2:
+                trec = (trends or {}).get(key) if isinstance(trends, dict) else None
+                tr, terr, t_rat = None, None, None
+                if isinstance(trec, dict):
+                    tr = trec.get("trend")
+                    terr = trec.get("error")
+                    t_rat = trec.get("rationale")
+                label = FO_INDEX_UNDERLYING_LABELS.get(key, key)
+                if vis_dis:
+                    badge = "— (vision disabled)"
+                elif tr in ("BULLISH", "BEARISH", "NEUTRAL"):
+                    badge = str(tr)
+                else:
+                    badge = "—"
+                st.markdown(f"**{label}** · trend: **{badge}**")
+                if isinstance(t_rat, str) and t_rat.strip():
+                    st.info(f"**Vision rationale:** {t_rat.strip()}")
+                elif tr in ("BULLISH", "BEARISH", "NEUTRAL") and not (
+                    isinstance(t_rat, str) and t_rat.strip()
+                ):
+                    st.caption(
+                        "No rationale text in the last snapshot (Claude must return JSON including a "
+                        "`rationale` field, or the response was parsed from trend word only)."
+                    )
+                if terr and not tr:
+                    raw_e = str(terr)
+                    low_e = raw_e.lower()
+                    if "kaleido" in low_e or "plotly_get_chrome" in low_e or "google chrome" in low_e:
+                        st.info(_format_stored_vision_error(raw_e))
+                    else:
+                        st.caption(raw_e)
+                df_1, err_1 = load_index_session_interval_df(
+                    kite, nse, session_d, key, "minute"
+                )
+                if df_1 is None or err_1 or df_1.empty:
+                    st.warning(err_1 or "No 1-minute data for this index.")
+                else:
+                    fig3 = build_index_vision_candlestick_figure(df_1, key)
+                    fig3.update_layout(title=f"{label} — 1m · vision trend: {badge}")
+                    st.plotly_chart(fig3, use_container_width=True, key=f"mock_idx1m_{key}")
 
         st.subheader("Scrips — two columns")
         st.caption(

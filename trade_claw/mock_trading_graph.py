@@ -24,6 +24,7 @@ from trade_claw.env_trading_params import (
     option_target_premium_fraction,
 )
 from trade_claw.fo_support import _to_date
+from trade_claw.mock_index_vision_trend import reference_vision_index_for_mock_engine
 from trade_claw.mock_market_signal import (
     envelope_breakout_on_last_bar,
     load_index_session_minute_df,
@@ -106,10 +107,26 @@ from trade_claw.mock_trade_snapshot import (
 
 
 class LLMPick(BaseModel):
-    tradingsymbol: str = Field(description="Must be exactly one tradingsymbol from the candidate list")
-    rationale: str = Field(description="Short rationale for strike and risk levels")
-    stop_loss: float = Field(description="Stop loss for the chosen option, premium in INR (must be below synthetic entry)")
-    target: float = Field(description="Take-profit for the chosen option, premium in INR (must be above synthetic entry)")
+    proceed_with_trade: bool = Field(
+        default=True,
+        description=(
+            "If true, pick one candidate and give stop/target. If false, skip the mock trade "
+            "(set tradingsymbol to empty string); rationale must explain why, e.g. counter-trend without conviction."
+        ),
+    )
+    tradingsymbol: str = Field(
+        default="",
+        description="Exactly one tradingsymbol from the candidate list when proceed_with_trade is true; else empty.",
+    )
+    rationale: str = Field(description="Rationale for the pick or for skipping the trade")
+    stop_loss: float = Field(
+        default=0.0,
+        description="Stop loss premium INR when proceeding; 0 when skipping",
+    )
+    target: float = Field(
+        default=0.0,
+        description="Target premium INR when proceeding; 0 when skipping",
+    )
 
 
 class TradingState(TypedDict, total=False):
@@ -130,6 +147,81 @@ class TradingState(TypedDict, total=False):
     target: float
     llm_rationale: str
     trade_id: int
+    index_trends_3m: dict[str, Any] | None
+    index_vision_disabled: bool
+    llm_skip_trade: bool
+
+
+def _index_trend_block_for_prompt(
+    *,
+    idx: str,
+    direction: str | None,
+    index_trends_3m: dict[str, Any] | None,
+    vision_disabled: bool,
+) -> tuple[str, str]:
+    """
+    Returns (reference_index_key, multiline context for LLM).
+    reference index is which Nifty/Bank Nifty trend applies to this underlying.
+    """
+    ref = reference_vision_index_for_mock_engine(idx)
+    ref_label = FO_INDEX_UNDERLYING_LABELS.get(ref, ref)
+    lines: list[str] = [
+        f"Reference index for trend alignment: **{ref}** ({ref_label}) — bank equities use BANKNIFTY; most others use NIFTY.",
+    ]
+    if vision_disabled:
+        lines.append(
+            "Index vision (1m chart, Claude Haiku 4.5) is **disabled** (MOCK_INDEX_VISION_ENABLED=0): "
+            "no automated trend labels; decide conservatively."
+        )
+        return ref, "\n".join(lines)
+
+    if not index_trends_3m or not isinstance(index_trends_3m, dict):
+        lines.append(
+            "Index vision data is **missing** this tick: treat trend as unknown (1m chart + Claude, refreshed on schedule)."
+        )
+        return ref, "\n".join(lines)
+
+    for key in ("NIFTY", "BANKNIFTY"):
+        block = index_trends_3m.get(key)
+        if isinstance(block, dict):
+            tr = block.get("trend")
+            err = block.get("error")
+            rat = block.get("rationale")
+            label = FO_INDEX_UNDERLYING_LABELS.get(key, key)
+            if err and not tr:
+                lines.append(f"- {label}: **error** — {err}")
+            elif tr in ("BULLISH", "BEARISH", "NEUTRAL"):
+                line = f"- {label}: **{tr}**"
+                if isinstance(rat, str) and rat.strip():
+                    line += f' — vision rationale: "{rat.strip()}"'
+                lines.append(line)
+            else:
+                lines.append(f"- {label}: **unknown**")
+        else:
+            lines.append(f"- {FO_INDEX_UNDERLYING_LABELS.get(key, key)}: **no data**")
+
+    d = (direction or "").upper().strip()
+    ref_block = index_trends_3m.get(ref) if isinstance(index_trends_3m, dict) else None
+    ref_trend = None
+    if isinstance(ref_block, dict):
+        rt = ref_block.get("trend")
+        if rt in ("BULLISH", "BEARISH", "NEUTRAL"):
+            ref_trend = str(rt)
+    if d == "BULLISH" and ref_trend == "BULLISH":
+        lines.append("Envelope signal vs reference index trend: **aligned** (both bullish).")
+    elif d == "BEARISH" and ref_trend == "BEARISH":
+        lines.append("Envelope signal vs reference index trend: **aligned** (both bearish).")
+    elif ref_trend in ("BULLISH", "BEARISH") and d in ("BULLISH", "BEARISH") and d != ref_trend:
+        lines.append(
+            "Envelope signal vs reference index trend: **counter-trend** — only open if the setup is "
+            "**exceptionally compelling**; otherwise set proceed_with_trade to false or explain a strong contrarian case."
+        )
+    elif ref_trend == "NEUTRAL":
+        lines.append("Reference index trend is **NEUTRAL** — range/choppy; be cautious; skip unless edge is clear.")
+    else:
+        lines.append("Could not compare signal to reference trend (missing or ambiguous); decide conservatively.")
+
+    return ref, "\n".join(lines)
 
 
 def _openai_creds() -> tuple[str, str]:
@@ -264,12 +356,29 @@ def build_mock_trading_graph(
         sug_stp = option_stop_premium_fraction()
         risk_extra = mock_llm_risk_instruction()
         risk_block = f"\n\nAdditional risk guidance from operator:\n{risk_extra}" if risk_extra else ""
+        _, trend_ctx = _index_trend_block_for_prompt(
+            idx=idx,
+            direction=str(state.get("direction") or ""),
+            index_trends_3m=state.get("index_trends_3m") if isinstance(state.get("index_trends_3m"), dict) else None,
+            vision_disabled=bool(state.get("index_vision_disabled")),
+        )
+        trend_instructions = (
+            "\n\n**Index vision — 1m chart, Claude Haiku 4.5 (advisory, not a hard block):**\n"
+            f"{trend_ctx}\n"
+            "Prefer opening **with** the reference index trend when it is clear (BULLISH/BEARISH). "
+            "If the spot envelope signal is **against** that trend, only set proceed_with_trade to true when the "
+            "setup is **super obvious** (spell out why in rationale). Otherwise set **proceed_with_trade** to **false** "
+            "and explain. If vision is missing or disabled, still use your judgment and say so in rationale."
+        )
         sys = SystemMessage(
             content=(
                 "You choose one **NSE F&O option** contract (index or single-stock underlying) for a "
                 "**long premium only** mock trade "
-                "(calls for bullish, puts for bearish — wrong type already removed in code). "
-                "Pick the best strike/expiry among the candidates using DTE, moneyness vs spot, and liquidity (LTP). "
+                "(calls for bullish, puts for bearish — wrong type already removed in code), **or** you decline to trade.\n"
+                "Set **proceed_with_trade** to **false** to skip opening a position (e.g. counter-trend without conviction); "
+                "then leave **tradingsymbol** empty and put stop_loss/target at 0.\n"
+                "If **proceed_with_trade** is **true**, pick the best strike/expiry among the candidates using DTE, "
+                "moneyness vs spot, and liquidity (LTP). "
                 "You must also output **stop_loss** and **target** as option **premium prices in Indian rupees (₹)** "
                 "for the **same contract** you pick (the chosen row's LTP is your reference). "
                 "Synthetic long entry will be approximately **LTP minus ~0.5–1.0 ₹ slippage** — "
@@ -281,6 +390,7 @@ def build_mock_trading_graph(
                 f"above entry; stop between −{100 * st_hi_p:.1f}% and −{100 * st_lo_p:.1f}% below entry "
                 f"(i.e. stop premium in that band below entry). "
                 "Use two decimal places mentally; output numeric rupee levels."
+                f"{trend_instructions}"
                 f"{risk_block}"
             )
         )
@@ -296,6 +406,14 @@ def build_mock_trading_graph(
         except Exception as e:  # noqa: BLE001
             scan_warning("graph_err", "LLM invoke failed underlying=%s: %s", idx, e)
             return {"error": f"LLM failed: {e}"}
+        if not pick.proceed_with_trade:
+            r = (pick.rationale or "").strip()
+            scan_info("llm_skip", "LLM_SKIP underlying=%s rationale=%s", idx, r[:500])
+            return {
+                "llm_skip_trade": True,
+                "llm_rationale": r,
+                "notes": f"LLM declined trade: {r}",
+            }
         if pick.tradingsymbol not in allowed:
             scan_warning(
                 "graph_err",
@@ -317,6 +435,7 @@ def build_mock_trading_graph(
             "llm_rationale": pick.rationale.strip(),
             "llm_stop_loss": float(pick.stop_loss),
             "llm_target": float(pick.target),
+            "llm_skip_trade": False,
         }
 
     def execute_node(state: TradingState) -> TradingState:
@@ -409,7 +528,11 @@ def build_mock_trading_graph(
         return "llm"
 
     def route_after_llm(state: TradingState) -> str:
-        if state.get("error") or not state.get("llm_tradingsymbol"):
+        if state.get("error"):
+            return "end"
+        if state.get("llm_skip_trade"):
+            return "end"
+        if not state.get("llm_tradingsymbol"):
             return "end"
         return "execute"
 

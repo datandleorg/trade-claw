@@ -46,6 +46,8 @@ services:
             - "node_modules"
             - "frontend/node_modules"
 
+  # Worker code and deps come from the image (only /app/data is mounted). After changing Python or pyproject/uv.lock,
+  # rebuild: `docker compose build celery-worker` (or `docker compose build`) then `docker compose up -d celery-worker`.
   celery-worker:
     build:
       context: .

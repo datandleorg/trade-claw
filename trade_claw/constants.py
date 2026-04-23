@@ -44,6 +44,10 @@ MOCK_ENGINE_SCAN_EQUITY_SYMBOLS = [
     "ADANIENT",
     "ADANIPORTS",
 ]
+# Mock engine: equity symbols that follow Bank Nifty 3m vision trend (vs Nifty 50 for others).
+MOCK_ENGINE_BANK_SYMBOLS: frozenset[str] = frozenset(
+    {"HDFCBANK", "ICICIBANK", "AXISBANK", "KOTAKBANK", "SBIN"}
+)
 # Summary metrics: Target or Stop = realised; EOD = held to close
 FO_CLOSED_AT_REALISED = ("Target", "Stop")
 # F&O UI: envelope distance each side as % of EMA (upper = EMA×(1+pct), lower = EMA×(1−pct))
